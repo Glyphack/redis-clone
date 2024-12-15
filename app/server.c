@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -13,6 +14,7 @@ void *connection_handler(void *arg);
 
 #define MAX_ENTRY_STR_SIZE 128
 #define MAX_MAP_SIZE 1000
+#define RESPONSE_ITEM_MAX_SIZE 256
 
 struct HashMapNode {
   char *key;
@@ -83,12 +85,65 @@ struct HashMapNode *hashmap_get(struct HashMap *h, char *key) {
 struct Context {
   int conn_fd;
   struct HashMap *hashmap;
+  struct Config *config;
 };
 
-int main() {
+struct Config {
+  char *dir;
+  char *dbfilename;
+};
+
+void printConfig(struct Config *config) {
+  printf("config:\n");
+  printf("  dir `%s`\n", config->dir);
+  printf("  dbfilename `%s`\n", config->dbfilename);
+}
+
+void *getConfig(struct Config *config, char *name) {
+  if (strcmp(name, "dir") == 0) {
+    return config->dir;
+  }
+  if (strcmp(name, "dbfilename") == 0) {
+    return config->dbfilename;
+  }
+
+  fprintf(stderr, "Unknown Config %s\n", name);
+  return NULL;
+}
+
+int main(int argc, char *argv[]) {
   // Disable output buffering for testing
   setbuf(stdout, NULL);
   setbuf(stderr, NULL);
+
+  struct Config *config = (struct Config *)malloc(sizeof(struct Config));
+  config->dbfilename = (char *)malloc(0);
+  config->dir = (char *)malloc(0);
+
+  if (argc > 1) {
+    for (int i = 0; i < argc; i++) {
+      char *flag_name = argv[i];
+      if (strcmp(flag_name, "--dir") == 0) {
+        char *flag_val = argv[++i];
+        DIR *dp = opendir(flag_val);
+        if (dp == NULL) {
+          perror("Could not open directory passed to -dir");
+        }
+        closedir(dp);
+        config->dir = (char *)malloc(strlen(flag_val));
+        strcpy(config->dir, flag_val);
+        printf("dir %s\n", flag_val);
+      }
+      if (strcmp(flag_name, "--dbfilename") == 0) {
+        char *flag_val = argv[++i];
+        config->dbfilename = (char *)malloc(strlen(flag_val));
+        strcpy(config->dbfilename, flag_val);
+        printf("dbfilename %s\n", flag_val);
+      }
+    }
+  }
+
+  printConfig(config);
 
   int server_fd;
   socklen_t client_addr_len;
@@ -138,7 +193,7 @@ int main() {
     struct Context *context = malloc(sizeof(struct Context));
     context->conn_fd = client_fd;
     context->hashmap = hashmap;
-    fprintf(stderr, "DEBUGPRINT[3]: server.c:60: client_fd=%d\n", client_fd);
+    context->config = config;
     if (pthread_create(&thread_id, NULL, connection_handler, (void *)context) <
         0) {
       perror("Could not create thread");
@@ -155,7 +210,7 @@ int main() {
   return 0;
 }
 
-void *send_response(int client_fd, char *msg) {
+void *respond_with_msg(int client_fd, char *msg) {
   char response[256];
   response[0] = '\0';
   snprintf(response, sizeof(response), "$%d\r\n%s\r\n", (int)strlen(msg), msg);
@@ -169,7 +224,7 @@ void *send_response(int client_fd, char *msg) {
   return NULL;
 }
 
-void *send_null_response(int client_fd) {
+void *respond_null(int client_fd) {
   char response[6];
   response[5] = '\0';
   snprintf(response, sizeof(response), "$%d\r\n", -1);
@@ -181,6 +236,29 @@ void *send_null_response(int client_fd) {
     printf("bytes sent %d\n", sent);
   }
   return NULL;
+}
+
+int send_response(int client_fd, char *response) {
+  int sent = send(client_fd, response, strlen(response), 0);
+  if (sent < 0) {
+    fprintf(stderr, "Could not send response: %s\n", strerror(errno));
+  } else {
+    printf("bytes sent %d\n", sent);
+  }
+  return sent;
+}
+
+void send_response_array(int client_fd, char **items, int size) {
+  char response[RESPONSE_ITEM_MAX_SIZE * size + size % 10 + 5];
+  sprintf(response, "*%d\r\n", size);
+  for (int i = 0; i < size; i++) {
+    char formatted[RESPONSE_ITEM_MAX_SIZE];
+    snprintf(formatted, RESPONSE_ITEM_MAX_SIZE, "$%d\r\n%s\r\n",
+             (int)strlen(items[i]), items[i]);
+    strncat(response, formatted, RESPONSE_ITEM_MAX_SIZE);
+  }
+  fprintf(stderr, "DEBUGPRINT[7]: server.c:256: response=%s\n", response);
+  send_response(client_fd, response);
 }
 
 long long get_current_time() {
@@ -195,7 +273,6 @@ long long get_current_time() {
 void *connection_handler(void *arg) {
   struct Context *ctx = (struct Context *)arg;
   int client_fd = ctx->conn_fd;
-  fprintf(stderr, "DEBUGPRINT[1]: server.c:78: client_fd=%d\n", client_fd);
 
   while (1) {
     int req_size = 2048;
@@ -244,7 +321,7 @@ void *connection_handler(void *arg) {
           printf("responding to echo\n");
           i = i + 1;
           int argument_len = strlen(parts[i]);
-          send_response(ctx->conn_fd, parts[i]);
+          respond_with_msg(ctx->conn_fd, parts[i]);
         } else if (strncmp(parts[i], "SET", 3) == 0) {
           printf("responding to set\n");
           char *key = parts[++i];
@@ -265,23 +342,23 @@ void *connection_handler(void *arg) {
           strcpy(hNode->val, val);
           hNode->ttl = ttl;
           hashmap_insert(ctx->hashmap, hNode);
-          send_response(ctx->conn_fd, "OK");
+          respond_with_msg(ctx->conn_fd, "OK");
         } else if (strncmp(parts[i], "GET", 3) == 0) {
           printf("responding to get\n");
           char *key = parts[++i];
           struct HashMapNode *node = hashmap_get(ctx->hashmap, key);
           if (node == NULL) {
-            send_null_response(ctx->conn_fd);
+            respond_null(ctx->conn_fd);
             continue;
           }
           long long current_time = get_current_time();
           printf("current time: %lld", current_time);
           if (node->ttl < current_time && node->ttl != -1) {
             printf("item expired ttl: %lld \n", node->ttl);
-            send_null_response(ctx->conn_fd);
+            respond_null(ctx->conn_fd);
             continue;
           }
-          send_response(ctx->conn_fd, node->val);
+          respond_with_msg(ctx->conn_fd, node->val);
         } else if (strncmp(parts[i], "PING", 4) == 0) {
           printf("responding to ping\n");
           char message[7] = "+PONG\r\n";
@@ -291,6 +368,22 @@ void *connection_handler(void *arg) {
           } else {
             printf("bytes sent %d\n", sent);
           }
+        } else if (strcmp(parts[i], "CONFIG") == 0) {
+          // Should I be increased if we cannot handle the argument?
+          if (strcmp(parts[++i], "GET") != 0) {
+            perror("Unknown command\n");
+            break;
+          }
+
+          char *arg = parts[++i];
+          char *config_val = getConfig(ctx->config, arg);
+          if (config_val == NULL) {
+            perror("Unknown command\n");
+            break;
+          }
+
+          char *resps[2] = {arg, config_val};
+          send_response_array(ctx->conn_fd, resps, 2);
         } else {
           perror("Unknown command\n");
           break;
