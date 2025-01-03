@@ -139,14 +139,18 @@ ret:
 }
 
 uint16_t read_little_endian_16(char *bytes) {
-  printf("Byte value: 0x%02X\n", bytes[1]);
-
   return (uint16_t)(bytes[0] | (bytes[1] << 8));
 }
 
-uint32_t read_little_endian_32(unsigned char *bytes) {
+uint32_t read_little_endian_32(char *bytes) {
   return (uint32_t)(bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) |
                     (bytes[3] << 24));
+}
+
+int64_t read_little_endian_64(char *bytes) {
+  int64_t result;
+  memcpy(&result, bytes, 8);
+  return result;
 }
 
 typedef struct {
@@ -236,7 +240,7 @@ int parse_integer_encoded_as_string(char **cursor, int special_mode) {
     result = num;
     p += 2;
   } else if (special_mode == 2) {
-    uint32_t num = read_little_endian_32((unsigned char *)p);
+    uint32_t num = read_little_endian_32(p);
     result = num;
     p += 4;
   } else {
@@ -276,6 +280,7 @@ void printRdb(const RdbContent *rdb) {
     for (int j = 0; j < db->data->size; j++) {
       printf("key : %s\n", db->data->nodes[j]->key);
       printf("value : %s\n", db->data->nodes[j]->val);
+      printf("expiration: %lld\n", db->data->nodes[j]->ttl);
     }
   }
 }
@@ -390,21 +395,26 @@ RdbContent *parse_rdb(char *path) {
       printf("reading key val section\n");
       while ((unsigned char)*p != 0xFE && (unsigned char)*p != 0xFF) {
         int expire_time_kind = RDB_KEY_EXP_KIND_NO_TTL;
-        int expire_time = 0;
+        int64_t expire_time = -1;
 
         // "expiry time in seconds", followed by 4 byte unsigned int
         if ((unsigned char)*p == 0xFD) {
           p++;
           expire_time_kind = RDB_KEY_EXP_KIND_S;
-          expire_time = (int)*p;
+          expire_time = read_little_endian_32(p);
+          p += 4;
         }
 
         // "expiry time in ms", followed by 8 byte unsigned long
         if ((unsigned char)*p == 0xFC) {
           p++;
           expire_time_kind = RDB_KEY_EXP_KIND_MS;
-          expire_time = read_little_endian_16(p);
+          expire_time = read_little_endian_64(p);
+          p += 8;
         }
+
+        fprintf(stderr, "expiration time: %lld\n", expire_time);
+        DEBUG_PRINT(expire_time, lld);
 
         // 0 = String Encoding
         // 1 = List Encoding
@@ -418,6 +428,8 @@ RdbContent *parse_rdb(char *path) {
         // 13 = Hashmap in Ziplist Encoding (Introduced in RDB version 4)
         // 14 = List in Quicklist encoding (Introduced in RDB version 7)
         int value_type = (int)*p;
+
+        fprintf(stderr, "value type %d\n", (int)*p);
         // read type
         p++;
 
@@ -447,6 +459,7 @@ RdbContent *parse_rdb(char *path) {
           UNREACHABLE();
           break;
         }
+
         switch (expire_time_kind) {
         case RDB_KEY_EXP_KIND_NO_TTL:
           node->ttl = -1;
@@ -461,6 +474,7 @@ RdbContent *parse_rdb(char *path) {
           fprintf(stderr, "unknown expiration time");
           break;
         }
+
         hashmap_insert(rdb_db->data, node);
       }
 
@@ -717,7 +731,7 @@ void *connection_handler(void *arg) {
               break;
             }
             long long current_time = get_current_time();
-            printf("current time: %lld", current_time);
+            printf("current time: %lld\n", current_time);
             ttl = current_time + atoi(parts[++i]);
           }
           printf("ttl: %lld", ttl);

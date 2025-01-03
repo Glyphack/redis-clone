@@ -31,6 +31,8 @@
 
 #define RDB_SIZE_6_BIT_LEN 1
 
+#define DEBUG_PRINT(var, fmt) fprintf(stderr, "DEBUG: (%s:%d) %s = %" #fmt "\n", __FILE__, __LINE__, #var, var)
+
 typedef struct {
   char* data;
   size_t len;
@@ -52,7 +54,7 @@ typedef struct {
   char *key;
   char *val;
   // Expiration time in milliseconds
-  long long ttl;
+  int64_t ttl;
 } HashMapNode;
 
 HashMapNode *hashmap_node_init();
