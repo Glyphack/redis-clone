@@ -16,6 +16,10 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#define RDB_KEY_EXP_KIND_NO_TTL 0
+#define RDB_KEY_EXP_KIND_S 1
+#define RDB_KEY_EXP_KIND_MS 2
+
 #define MAX_ENTRY_STR_SIZE 128
 #define MAX_MAP_SIZE 1000
 #define RESPONSE_ITEM_MAX_SIZE 256
@@ -47,6 +51,7 @@ void *getConfig(Config *config, char *name);
 typedef struct {
   char *key;
   char *val;
+  // Expiration time in milliseconds
   long long ttl;
 } HashMapNode;
 

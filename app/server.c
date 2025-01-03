@@ -24,6 +24,15 @@
     exit(EXIT_FAILURE);                                                        \
   } while (0)
 
+long long get_current_time() {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+    return (long long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+  } else {
+    return 0;
+  }
+}
+
 HashMapNode *hashmap_node_init() {
   HashMapNode *hNode = (HashMapNode *)malloc(sizeof(HashMapNode));
   hNode->key = (char *)malloc(MAX_ENTRY_STR_SIZE);
@@ -129,7 +138,7 @@ ret:
   return data;
 }
 
-uint16_t read_little_endian_16(unsigned char *bytes) {
+uint16_t read_little_endian_16(char *bytes) {
   printf("Byte value: 0x%02X\n", bytes[1]);
 
   return (uint16_t)(bytes[0] | (bytes[1] << 8));
@@ -223,7 +232,7 @@ int parse_integer_encoded_as_string(char **cursor, int special_mode) {
     result = (int)*p;
     p++;
   } else if (special_mode == 1) {
-    uint16_t num = read_little_endian_16((unsigned char *)p);
+    uint16_t num = read_little_endian_16(p);
     result = num;
     p += 2;
   } else if (special_mode == 2) {
@@ -380,13 +389,21 @@ RdbContent *parse_rdb(char *path) {
       // read db keys
       printf("reading key val section\n");
       while ((unsigned char)*p != 0xFE && (unsigned char)*p != 0xFF) {
+        int expire_time_kind = RDB_KEY_EXP_KIND_NO_TTL;
+        int expire_time = 0;
+
+        // "expiry time in seconds", followed by 4 byte unsigned int
         if ((unsigned char)*p == 0xFD) {
-          printf("expiry time");
-          exit(1);
+          p++;
+          expire_time_kind = RDB_KEY_EXP_KIND_S;
+          expire_time = (int)*p;
         }
+
+        // "expiry time in ms", followed by 8 byte unsigned long
         if ((unsigned char)*p == 0xFC) {
-          printf("expiry time");
-          exit(1);
+          p++;
+          expire_time_kind = RDB_KEY_EXP_KIND_MS;
+          expire_time = read_little_endian_16(p);
         }
 
         // 0 = String Encoding
@@ -401,8 +418,10 @@ RdbContent *parse_rdb(char *path) {
         // 13 = Hashmap in Ziplist Encoding (Introduced in RDB version 4)
         // 14 = List in Quicklist encoding (Introduced in RDB version 7)
         int value_type = (int)*p;
+        // read type
         p++;
 
+        HashMapNode *node = hashmap_node_init();
         switch (value_type) {
         case 0:
           printf("key type string\n");
@@ -421,15 +440,30 @@ RdbContent *parse_rdb(char *path) {
                     "expected special format to be 0 for string key val");
           }
           parse_len_encoded_string(&p, len, &value);
-          HashMapNode *node = hashmap_node_init();
           node->key = convertToCStr(key.str_value);
           node->val = convertToCStr(value.str_value);
-          hashmap_insert(rdb_db->data, node);
           break;
-        dedefault:
+        default:
+          UNREACHABLE();
           break;
         }
+        switch (expire_time_kind) {
+        case RDB_KEY_EXP_KIND_NO_TTL:
+          node->ttl = -1;
+          break;
+        case RDB_KEY_EXP_KIND_S:
+          node->ttl = expire_time * 1000;
+          break;
+        case RDB_KEY_EXP_KIND_MS:
+          node->ttl = expire_time;
+          break;
+        default:
+          fprintf(stderr, "unknown expiration time");
+          break;
+        }
+        hashmap_insert(rdb_db->data, node);
       }
+
       push_vec(rdbContent->databases, rdb_db);
 
       if ((unsigned char)*p == 0xFE) {
@@ -618,15 +652,6 @@ void send_response_array(int client_fd, char **items, int size) {
     strncat(response, formatted, RESPONSE_ITEM_MAX_SIZE);
   }
   send_response(client_fd, response);
-}
-
-long long get_current_time() {
-  struct timespec ts;
-  if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
-    return (long long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-  } else {
-    return 0;
-  }
 }
 
 void *connection_handler(void *arg) {
