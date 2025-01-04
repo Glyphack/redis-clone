@@ -96,6 +96,9 @@ void printConfig(Config *config) {
   fprintf(stderr, "config:\n");
   fprintf(stderr, "  dir `%s`\n", config->dir);
   fprintf(stderr, "  dbfilename `%s`\n", config->dbfilename);
+  fprintf(stderr, "  port `%d`\n", config->port);
+  fprintf(stderr, "  master host `%s`\n", config->master_host);
+  fprintf(stderr, "  master port `%d`\n", config->master_port);
 }
 
 void *getConfig(Config *config, char *name) {
@@ -119,6 +122,7 @@ int main(int argc, char *argv[]) {
   config->dbfilename = NULL;
   config->dir = NULL;
   config->port = 6379;
+  config->master_host = NULL;
 
   int print_rdb_and_exit = 0;
 
@@ -149,7 +153,21 @@ int main(int argc, char *argv[]) {
         i++;
         config->port = atoi(argv[i]);
       }
+      if (strcmp(flag_name, "--replicaof") == 0) {
+        i++;
+        char *hostinfo = argv[i];
+        char *host = strtok(hostinfo, " ");
+        int port = atoi(strtok(NULL, " "));
+        config->master_host = host;
+        config->master_port = port;
+      }
     }
+  }
+
+  if (config->master_host == NULL) {
+    // config->master_replid = malloc(40);
+    config->master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+    config->master_repl_offset = 0;
   }
 
   printConfig(config);
@@ -412,9 +430,22 @@ void *connection_handler(void *arg) {
           char *resps[2] = {arg, config_val};
           send_response_array(ctx->conn_fd, resps, 2);
         } else if (strcmp(parts[i], "INFO") == 0) {
-          // char *resps[1] = {"role:master"};
-          // send_response_array(ctx->conn_fd, resps, 1);
-          respond_with_msg(ctx->conn_fd, "role:master");
+          char *resps[3] = {};
+          char *role_info = "role:master";
+          if (ctx->config->master_host != NULL) {
+            role_info = "role:slave";
+          }
+
+          resps[0] = role_info;
+          resps[1] = malloc(strlen("master_replid:") +
+                            strlen(ctx->config->master_replid) + 1);
+          resps[1] = "master_replid:";
+          strcat(resps[1], ctx->config->master_replid);
+          // resps[2] = "master_repl_offset:";
+          // char repl_offset[20];
+          // sprintf(repl_offset, "%d", ctx->config->master_repl_offset);
+          // strcat(resps[2], repl_offset);
+          send_response_array(ctx->conn_fd, resps, 1);
         } else {
 
           perror("Unknown command\n");
