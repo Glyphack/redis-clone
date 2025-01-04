@@ -118,6 +118,7 @@ int main(int argc, char *argv[]) {
   Config *config = (Config *)malloc(sizeof(Config));
   config->dbfilename = NULL;
   config->dir = NULL;
+  config->port = 6379;
 
   int print_rdb_and_exit = 0;
 
@@ -143,6 +144,10 @@ int main(int argc, char *argv[]) {
       }
       if (strcmp(flag_name, "--test-rdb") == 0) {
         print_rdb_and_exit = 1;
+      }
+      if (strcmp(flag_name, "--port") == 0) {
+        i++;
+        config->port = atoi(argv[i]);
       }
     }
   }
@@ -187,7 +192,7 @@ int main(int argc, char *argv[]) {
 
   struct sockaddr_in serv_addr = {
       .sin_family = AF_INET,
-      .sin_port = htons(6379),
+      .sin_port = htons(config->port),
       .sin_addr = {htonl(INADDR_ANY)},
   };
 

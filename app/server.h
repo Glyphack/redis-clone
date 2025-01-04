@@ -46,6 +46,7 @@ char* convertToCStr(Mystr *s);
 typedef struct {
   char *dir;
   char *dbfilename;
+  int port;
 } Config;
 
 void printConfig(Config *config);
