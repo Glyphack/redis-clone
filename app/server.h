@@ -48,8 +48,7 @@ typedef struct {
   char *dbfilename;
   int port;
   // master server information
-  char *master_host;
-  int master_port;
+  struct sockaddr_in *master_info;
 
   char* master_replid;
   int master_repl_offset;

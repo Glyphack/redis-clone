@@ -1,6 +1,7 @@
 #include "server.h"
 #include "rdb.h"
 #include "vec.h"
+#include <arpa/inet.h>
 #include <stdint.h>
 #include <sys/stat.h>
 
@@ -97,8 +98,15 @@ void printConfig(Config *config) {
   fprintf(stderr, "  dir `%s`\n", config->dir);
   fprintf(stderr, "  dbfilename `%s`\n", config->dbfilename);
   fprintf(stderr, "  port `%d`\n", config->port);
-  fprintf(stderr, "  master host `%s`\n", config->master_host);
-  fprintf(stderr, "  master port `%d`\n", config->master_port);
+  if (config->master_info != NULL) {
+    char ip_str[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &(config->master_info->sin_addr), ip_str,
+                  INET_ADDRSTRLEN) == NULL) {
+      perror("inet_ntop");
+    }
+    fprintf(stderr, "  master host `%s`\n", ip_str);
+    fprintf(stderr, "  master port `%d`\n", config->master_info->sin_port);
+  }
 }
 
 void *getConfig(Config *config, char *name) {
@@ -113,6 +121,31 @@ void *getConfig(Config *config, char *name) {
   return NULL;
 }
 
+int handshake(Config *config) {
+
+  int sock = 0;
+  struct sockaddr_in serv_addr = *config->master_info;
+  char *message = "*1\r\n$4\r\nPING\r\n";
+
+  // Create socket
+  if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    printf("\n Socket creation error \n");
+    return -1;
+  }
+
+  // Connect to the server
+  if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+    printf("\nConnection Failed \n");
+    return -1;
+  }
+
+  // Send data
+  send(sock, message, strlen(message), 0);
+
+  close(sock);
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
   // Disable output buffering for testing
   setbuf(stdout, NULL);
@@ -122,7 +155,7 @@ int main(int argc, char *argv[]) {
   config->dbfilename = NULL;
   config->dir = NULL;
   config->port = 6379;
-  config->master_host = NULL;
+  config->master_info = NULL;
 
   int print_rdb_and_exit = 0;
 
@@ -155,11 +188,21 @@ int main(int argc, char *argv[]) {
       }
       if (strcmp(flag_name, "--replicaof") == 0) {
         i++;
+        struct sockaddr_in *serv_addr =
+            (struct sockaddr_in *)malloc(sizeof(struct sockaddr_in));
         char *hostinfo = argv[i];
         char *host = strtok(hostinfo, " ");
+        if (strcmp(host, "localhost") == 0) {
+          host = "127.0.0.1";
+        }
+        serv_addr->sin_family = AF_INET;
         int port = atoi(strtok(NULL, " "));
-        config->master_host = host;
-        config->master_port = port;
+        serv_addr->sin_port = htons(port);
+        if (inet_pton(AF_INET, host, &serv_addr->sin_addr) <= 0) {
+          printf("\nInvalid address/ Address not supported \n");
+          return -1;
+        }
+        config->master_info = serv_addr;
       }
     }
   }
@@ -221,6 +264,14 @@ int main(int argc, char *argv[]) {
   if (listen(server_fd, connection_backlog) != 0) {
     fprintf(stderr, "Listen failed: %s \n", strerror(errno));
     return 1;
+  }
+
+  if (config->master_info != NULL) {
+    if (handshake(config) == -1) {
+      printf("handshake failed\n");
+      exit(1);
+    }
+    printf("handshake with master succeeded\n");
   }
 
   printf("Waiting for a client to connect...\n");
@@ -438,7 +489,7 @@ void *connection_handler(void *arg) {
           char *resps[size];
 
           char *role_info = malloc(11);
-          if (ctx->config->master_host != NULL) {
+          if (ctx->config->master_info != NULL) {
             strcpy(role_info, "role:slave");
           } else {
             strcpy(role_info, "role:master");
