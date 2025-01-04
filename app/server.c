@@ -439,15 +439,18 @@ void *connection_handler(void *arg) {
           resps[0] = role_info;
           resps[1] = malloc(strlen("master_replid:") +
                             strlen(ctx->config->master_replid) + 1);
-          resps[1] = "master_replid:";
-          strcat(resps[1], ctx->config->master_replid);
-          // resps[2] = "master_repl_offset:";
-          // char repl_offset[20];
-          // sprintf(repl_offset, "%d", ctx->config->master_repl_offset);
-          // strcat(resps[2], repl_offset);
-          send_response_array(ctx->conn_fd, resps, 1);
-        } else {
 
+          strcpy(resps[1], "master_replid:");
+          strcat(resps[1], ctx->config->master_replid);
+
+          resps[2] = malloc(strlen("master_repl_offset:") + 20 + 1);
+          strcpy(resps[2], "master_repl_offset:");
+          char repl_offset[20];
+          sprintf(repl_offset, "%d", ctx->config->master_repl_offset);
+          strcat(resps[2], repl_offset);
+
+          send_response_array(ctx->conn_fd, resps, 3);
+        } else {
           perror("Unknown command\n");
           break;
         }
