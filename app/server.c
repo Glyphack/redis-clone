@@ -164,11 +164,9 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  if (config->master_host == NULL) {
-    // config->master_replid = malloc(40);
-    config->master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
-    config->master_repl_offset = 0;
-  }
+  // config->master_replid = malloc(40);
+  config->master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+  config->master_repl_offset = 0;
 
   printConfig(config);
 
@@ -252,7 +250,7 @@ int main(int argc, char *argv[]) {
   return 0;
 }
 
-void *respond_with_msg(int client_fd, char *msg) {
+void *send_response_bulk_string(int client_fd, char *msg) {
   char response[256];
   response[0] = '\0';
   snprintf(response, sizeof(response), "$%d\r\n%s\r\n", (int)strlen(msg), msg);
@@ -353,7 +351,7 @@ void *connection_handler(void *arg) {
           printf("responding to echo\n");
           i = i + 1;
           int argument_len = strlen(parts[i]);
-          respond_with_msg(ctx->conn_fd, parts[i]);
+          send_response_bulk_string(ctx->conn_fd, parts[i]);
         } else if (strncmp(parts[i], "SET", 3) == 0) {
           printf("responding to set\n");
           char *key = parts[++i];
@@ -374,7 +372,7 @@ void *connection_handler(void *arg) {
           strcpy(hNode->val, val);
           hNode->ttl = ttl;
           hashmap_insert(ctx->hashmap, hNode);
-          respond_with_msg(ctx->conn_fd, "OK");
+          send_response_bulk_string(ctx->conn_fd, "OK");
         } else if (strncmp(parts[i], "GET", 3) == 0) {
           printf("responding to get\n");
           char *key = parts[++i];
@@ -390,7 +388,7 @@ void *connection_handler(void *arg) {
             respond_null(ctx->conn_fd);
             continue;
           }
-          respond_with_msg(ctx->conn_fd, node->val);
+          send_response_bulk_string(ctx->conn_fd, node->val);
         } else if (strncmp(parts[i], "KEYS", 4) == 0) {
           char *pattern = parts[++i];
           if (strncmp(pattern, "*", 1) != 0) {
@@ -430,18 +428,29 @@ void *connection_handler(void *arg) {
           char *resps[2] = {arg, config_val};
           send_response_array(ctx->conn_fd, resps, 2);
         } else if (strcmp(parts[i], "INFO") == 0) {
-          char *resps[3] = {};
-          char *role_info = "role:master";
-          if (ctx->config->master_host != NULL) {
-            role_info = "role:slave";
+          i++;
+          if (strcmp(parts[i], "replication")) {
+            // no info other than replication supported
+            UNREACHABLE();
           }
+          int size = 3;
+          char *msg;
+          char *resps[size];
 
+          char *role_info = malloc(11);
+          if (ctx->config->master_host != NULL) {
+            strcpy(role_info, "role:slave");
+          } else {
+            strcpy(role_info, "role:master");
+          }
           resps[0] = role_info;
-          resps[1] = malloc(strlen("master_replid:") +
-                            strlen(ctx->config->master_replid) + 1);
 
-          strcpy(resps[1], "master_replid:");
-          strcat(resps[1], ctx->config->master_replid);
+          DEBUG_LOG("hi");
+          char *replid_info = malloc(strlen("master_replid:") +
+                                     strlen(ctx->config->master_replid) + 1);
+          strcpy(replid_info, "master_replid:");
+          strcat(replid_info, ctx->config->master_replid);
+          resps[1] = replid_info;
 
           resps[2] = malloc(strlen("master_repl_offset:") + 20 + 1);
           strcpy(resps[2], "master_repl_offset:");
@@ -449,7 +458,22 @@ void *connection_handler(void *arg) {
           sprintf(repl_offset, "%d", ctx->config->master_repl_offset);
           strcat(resps[2], repl_offset);
 
-          send_response_array(ctx->conn_fd, resps, 3);
+          // Allocate enough buffer for the whole message concatenated
+          int total_size = 0;
+          for (int i = 0; i < size; i++) {
+            // Plus 2 for the \n
+            total_size += strlen(resps[i]) + 2;
+          }
+          msg = malloc(total_size);
+
+          for (int i = 0; i < size; i++) {
+            strcat(msg, resps[i]);
+            if (i != size) {
+              strcat(msg, "\n");
+            }
+          }
+
+          send_response_bulk_string(ctx->conn_fd, msg);
         } else {
           perror("Unknown command\n");
           break;
