@@ -411,7 +411,12 @@ void *connection_handler(void *arg) {
 
           char *resps[2] = {arg, config_val};
           send_response_array(ctx->conn_fd, resps, 2);
+        } else if (strcmp(parts[i], "INFO") == 0) {
+          // char *resps[1] = {"role:master"};
+          // send_response_array(ctx->conn_fd, resps, 1);
+          respond_with_msg(ctx->conn_fd, "role:master");
         } else {
+
           perror("Unknown command\n");
           break;
         }

@@ -12,4 +12,4 @@ run:
 test: 
 	python test/test.py
 
-.PHONY: test
+.PHONY: test run
