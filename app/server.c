@@ -122,10 +122,9 @@ void *getConfig(Config *config, char *name) {
 }
 
 int handshake(Config *config) {
-
   int sock = 0;
   struct sockaddr_in serv_addr = *config->master_info;
-  char *message = "*1\r\n$4\r\nPING\r\n";
+  char *ping[1] = {"PING"};
 
   // Create socket
   if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -134,15 +133,40 @@ int handshake(Config *config) {
   }
 
   // Connect to the server
-  if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-    printf("\nConnection Failed \n");
+  if (connect(sock, (struct sockaddr *)config->master_info, sizeof(serv_addr)) <
+      0) {
+    printf("Connection Failed");
     return -1;
   }
 
-  // Send data
-  send(sock, message, strlen(message), 0);
+  // Initial handshake send a ping
+  send_response_array(sock, ping, 1);
 
+  // Closing the socket to avoid sending all the handshake data in one TCP
+  // packet. I don't know the right way
   close(sock);
+
+  // Create socket
+  if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    perror("Socket creation error");
+    return -1;
+  }
+  if (connect(sock, (struct sockaddr *)config->master_info, sizeof(serv_addr)) <
+      0) {
+    perror("Connection Failed");
+    return -1;
+  }
+
+  // Next inform the port
+  char port[6];
+  sprintf(port, "%d", config->port);
+  char *repl_conf1[3] = {
+      "REPLCONF",
+      "listening-port",
+      port,
+  };
+  send_response_array(sock, repl_conf1, 3);
+
   return 0;
 }
 
@@ -367,8 +391,6 @@ void *connection_handler(void *arg) {
       int part_count = atoi(&request[1]);
       char *parts[part_count];
 
-      printf("message has %d parts\n", part_count);
-
       int msg_len = 0;
       int cursor = 0;
       int part_index = 0;
@@ -385,13 +407,11 @@ void *connection_handler(void *arg) {
           char *msg_len_str = (char *)malloc(size_section_len * sizeof(char));
           strncpy(msg_len_str, request + size_start, size_section_len);
           msg_len = atoi(msg_len_str);
-          printf("part len: %d\n", msg_len);
           parts[part_index] = malloc((msg_len) * sizeof(char));
           strncpy(parts[part_index],
                   request + size_start + size_section_len + 2, msg_len);
           char *part = parts[part_index];
           part[msg_len] = '\0';
-          printf("part content: %s\n", parts[part_index]);
           part_index += 1;
           cursor += size_section_len + 2;
         }
@@ -525,6 +545,21 @@ void *connection_handler(void *arg) {
           }
 
           send_response_bulk_string(ctx->conn_fd, msg);
+        } else if (strcmp(parts[i], "REPLCONF") == 0) {
+          i++;
+          if (strcmp(parts[i], "listening-port") == 0) {
+            i++;
+            int port = atoi(parts[i]);
+          } else if (strcmp(parts[i], "capa") == 0) {
+            i++;
+            if (strcmp(parts[i++], " psync2") == 0) {
+            } else {
+              // Unsupported capability
+              UNREACHABLE();
+            }
+          }
+          send_response(ctx->conn_fd, "+OK\r\n");
+
         } else {
           perror("Unknown command\n");
           break;

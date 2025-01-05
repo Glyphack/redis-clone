@@ -85,4 +85,7 @@ typedef struct {
 
 
 void *connection_handler(void *arg);
+
+void send_response_array(int client_fd, char **items, int size);
+void *send_response_bulk_string(int client_fd, char *msg);
 #endif
