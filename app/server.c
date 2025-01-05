@@ -189,8 +189,27 @@ int handshake(Config *config) {
   nbytes = recv(master_fd, read_buffer, sizeof read_buffer, 0);
   if (nbytes <= 0)
     exit(1);
-  // Parse psync response later
-  // assert(strncmp(read_buffer, okMsg, nbytes) == 0);
+  printf("%s", read_buffer);
+  char *parts = strtok(read_buffer, " ");
+  assert(strcmp(parts, "+FULLRESYNC") == 0);
+  parts = strtok(NULL, " ");
+  DEBUG_PRINT(parts, s);
+  parts = strtok(NULL, " ");
+  int repl_offset = 0;
+  char *repl_offset_str = malloc(10);
+  char *curr_pos = parts;
+  while (*parts != '\0') {
+    parts++;
+    if (*parts == '\r') {
+      parts++;
+      if (*parts == '\n') {
+        strncpy(repl_offset_str, curr_pos, parts - curr_pos);
+        repl_offset = atoi(repl_offset_str);
+        free(repl_offset_str);
+      }
+    }
+  }
+  DEBUG_PRINT(repl_offset, d);
 
   return 0;
 }
@@ -289,8 +308,9 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  // Since the tester restarts your program quite often, setting SO_REUSEADDR
-  // ensures that we don't run into 'Address already in use' errors
+  // Since the tester restarts your program quite often, setting
+  // SO_REUSEADDR ensures that we don't run into 'Address already in use'
+  // errors
   int reuse = 1;
   if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) <
       0) {
@@ -409,196 +429,205 @@ void *connection_handler(void *arg) {
     char request[req_size];
     int bytes_received = recv(client_fd, request, req_size, 0);
 
-    if (bytes_received > 0) {
-      request[bytes_received] = '\0';
-      printf("Received request: `%s`\n", request);
+    if (bytes_received == 0) {
+      printf("Client did not send any data");
+      break;
+    } else if (bytes_received < 0) {
+      perror("Could not read from connection");
+    }
 
-      int part_count = atoi(&request[1]);
-      char *parts[part_count];
+    request[bytes_received] = '\0';
+    printf("Received request: `%s`\n", request);
 
-      int msg_len = 0;
-      int cursor = 0;
-      int part_index = 0;
-      while (cursor < bytes_received) {
-        char ch = request[cursor];
-        cursor = cursor + 1;
-        if (ch == '$') {
-          int size_start = cursor;
-          int size_section_len = 0;
-          while (ch != '\r') {
-            size_section_len++;
-            ch = request[size_start + size_section_len];
-          }
-          char *msg_len_str = (char *)malloc(size_section_len * sizeof(char));
-          strncpy(msg_len_str, request + size_start, size_section_len);
-          msg_len = atoi(msg_len_str);
-          parts[part_index] = malloc((msg_len) * sizeof(char));
-          strncpy(parts[part_index],
-                  request + size_start + size_section_len + 2, msg_len);
-          char *part = parts[part_index];
-          part[msg_len] = '\0';
-          part_index += 1;
-          cursor += size_section_len + 2;
+    int part_count = atoi(&request[1]);
+    char *parts[part_count];
+
+    int msg_len = 0;
+    int cursor = 0;
+    int part_index = 0;
+    while (cursor < bytes_received) {
+      char ch = request[cursor];
+      cursor = cursor + 1;
+      if (ch == '$') {
+        int size_start = cursor;
+        int size_section_len = 0;
+        while (ch != '\r') {
+          size_section_len++;
+          ch = request[size_start + size_section_len];
         }
+        char *msg_len_str = (char *)malloc(size_section_len * sizeof(char));
+        strncpy(msg_len_str, request + size_start, size_section_len);
+        msg_len = atoi(msg_len_str);
+        parts[part_index] = malloc((msg_len) * sizeof(char));
+        strncpy(parts[part_index], request + size_start + size_section_len + 2,
+                msg_len);
+        char *part = parts[part_index];
+        part[msg_len] = '\0';
+        part_index += 1;
+        cursor += size_section_len + 2;
       }
+    }
 
-      for (int i = 0; i < part_count; i++) {
-        if (strncmp(parts[i], "ECHO", 4) == 0) {
-          printf("responding to echo\n");
-          i = i + 1;
-          int argument_len = strlen(parts[i]);
-          send_response_bulk_string(ctx->conn_fd, parts[i]);
-        } else if (strncmp(parts[i], "SET", 3) == 0) {
-          printf("responding to set\n");
-          char *key = parts[++i];
-          char *val = parts[++i];
-          long long ttl = -1;
-          if (part_count > 3) {
-            if (strcmp(parts[++i], "px") != 0) {
-              perror("unknown command arguments");
-              break;
-            }
-            long long current_time = get_current_time();
-            printf("current time: %lld\n", current_time);
-            ttl = current_time + atoi(parts[++i]);
-          }
-          printf("ttl: %lld", ttl);
-          HashMapNode *hNode = hashmap_node_init();
-          strcpy(hNode->key, key);
-          strcpy(hNode->val, val);
-          hNode->ttl = ttl;
-          hashmap_insert(ctx->hashmap, hNode);
-          send_response_bulk_string(ctx->conn_fd, "OK");
-        } else if (strncmp(parts[i], "GET", 3) == 0) {
-          printf("responding to get\n");
-          char *key = parts[++i];
-          HashMapNode *node = hashmap_get(ctx->hashmap, key);
-          if (node == NULL) {
-            respond_null(ctx->conn_fd);
-            continue;
+    for (int i = 0; i < part_count; i++) {
+      if (strncmp(parts[i], "ECHO", 4) == 0) {
+        printf("responding to echo\n");
+        i = i + 1;
+        int argument_len = strlen(parts[i]);
+        send_response_bulk_string(ctx->conn_fd, parts[i]);
+      } else if (strncmp(parts[i], "SET", 3) == 0) {
+        printf("responding to set\n");
+        char *key = parts[++i];
+        char *val = parts[++i];
+        long long ttl = -1;
+        if (part_count > 3) {
+          if (strcmp(parts[++i], "px") != 0) {
+            perror("unknown command arguments");
+            break;
           }
           long long current_time = get_current_time();
-          printf("current time: %lld", current_time);
-          if (node->ttl < current_time && node->ttl != -1) {
-            printf("item expired ttl: %lld \n", node->ttl);
-            respond_null(ctx->conn_fd);
-            continue;
-          }
-          send_response_bulk_string(ctx->conn_fd, node->val);
-        } else if (strncmp(parts[i], "KEYS", 4) == 0) {
-          char *pattern = parts[++i];
-          if (strncmp(pattern, "*", 1) != 0) {
-            printf("unrecognized pattern");
-            exit(1);
-          }
-          printf("responding to keys\n");
-          char **keys = hashmap_keys(ctx->hashmap);
-          if (keys == NULL) {
-            respond_null(ctx->conn_fd);
-            continue;
-          }
-          send_response_array(ctx->conn_fd, keys, ctx->hashmap->size);
-        } else if (strncmp(parts[i], "PING", 4) == 0) {
-          printf("responding to ping\n");
-          char message[7] = "+PONG\r\n";
-          int sent = send(client_fd, message, 7, 0);
-          if (sent < 0) {
-            fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-          } else {
-            printf("bytes sent %d\n", sent);
-          }
-        } else if (strcmp(parts[i], "CONFIG") == 0) {
-          // Should I be increased if we cannot handle the argument?
-          if (strcmp(parts[++i], "GET") != 0) {
-            printf("Unknown command\n");
-            break;
-          }
-
-          char *arg = parts[++i];
-          char *config_val = getConfig(ctx->config, arg);
-          if (config_val == NULL) {
-            printf("Unknown command\n");
-            break;
-          }
-
-          char *resps[2] = {arg, config_val};
-          send_response_array(ctx->conn_fd, resps, 2);
-        } else if (strcmp(parts[i], "INFO") == 0) {
-          i++;
-          if (strcmp(parts[i], "replication")) {
-            // no info other than replication supported
-            UNREACHABLE();
-          }
-          int size = 3;
-          char *msg;
-          char *resps[size];
-
-          char *role_info = malloc(11);
-          if (ctx->config->master_info != NULL) {
-            strcpy(role_info, "role:slave");
-          } else {
-            strcpy(role_info, "role:master");
-          }
-          resps[0] = role_info;
-
-          DEBUG_LOG("hi");
-          char *replid_info = malloc(strlen("master_replid:") +
-                                     strlen(ctx->config->master_replid) + 1);
-          strcpy(replid_info, "master_replid:");
-          strcat(replid_info, ctx->config->master_replid);
-          resps[1] = replid_info;
-
-          resps[2] = malloc(strlen("master_repl_offset:") + 20 + 1);
-          strcpy(resps[2], "master_repl_offset:");
-          char repl_offset[20];
-          sprintf(repl_offset, "%d", ctx->config->master_repl_offset);
-          strcat(resps[2], repl_offset);
-
-          // Allocate enough buffer for the whole message concatenated
-          int total_size = 0;
-          for (int i = 0; i < size; i++) {
-            // Plus 2 for the \n
-            total_size += strlen(resps[i]) + 2;
-          }
-          msg = malloc(total_size);
-
-          for (int i = 0; i < size; i++) {
-            strcat(msg, resps[i]);
-            if (i != size) {
-              strcat(msg, "\n");
-            }
-          }
-
-          send_response_bulk_string(ctx->conn_fd, msg);
-        } else if (strcmp(parts[i], "REPLCONF") == 0) {
-          i++;
-          if (strcmp(parts[i], "listening-port") == 0) {
-            i++;
-            int port = atoi(parts[i]);
-          } else if (strcmp(parts[i], "capa") == 0) {
-            i++;
-            if (strcmp(parts[i], "psync2") == 0) {
-            } else {
-              // Unsupported capability
-              printf("%s", parts[i]);
-              UNREACHABLE();
-            }
-          }
-          send_response(ctx->conn_fd, "+OK\r\n");
-
+          printf("current time: %lld\n", current_time);
+          ttl = current_time + atoi(parts[++i]);
+        }
+        printf("ttl: %lld", ttl);
+        HashMapNode *hNode = hashmap_node_init();
+        strcpy(hNode->key, key);
+        strcpy(hNode->val, val);
+        hNode->ttl = ttl;
+        hashmap_insert(ctx->hashmap, hNode);
+        send_response_bulk_string(ctx->conn_fd, "OK");
+      } else if (strncmp(parts[i], "GET", 3) == 0) {
+        printf("responding to get\n");
+        char *key = parts[++i];
+        HashMapNode *node = hashmap_get(ctx->hashmap, key);
+        if (node == NULL) {
+          respond_null(ctx->conn_fd);
+          continue;
+        }
+        long long current_time = get_current_time();
+        printf("current time: %lld", current_time);
+        if (node->ttl < current_time && node->ttl != -1) {
+          printf("item expired ttl: %lld \n", node->ttl);
+          respond_null(ctx->conn_fd);
+          continue;
+        }
+        send_response_bulk_string(ctx->conn_fd, node->val);
+      } else if (strncmp(parts[i], "KEYS", 4) == 0) {
+        char *pattern = parts[++i];
+        if (strncmp(pattern, "*", 1) != 0) {
+          printf("unrecognized pattern");
+          exit(1);
+        }
+        printf("responding to keys\n");
+        char **keys = hashmap_keys(ctx->hashmap);
+        if (keys == NULL) {
+          respond_null(ctx->conn_fd);
+          continue;
+        }
+        send_response_array(ctx->conn_fd, keys, ctx->hashmap->size);
+      } else if (strncmp(parts[i], "PING", 4) == 0) {
+        printf("responding to ping\n");
+        char message[7] = "+PONG\r\n";
+        int sent = send(client_fd, message, 7, 0);
+        if (sent < 0) {
+          fprintf(stderr, "Could not send response: %s\n", strerror(errno));
         } else {
+          printf("bytes sent %d\n", sent);
+        }
+      } else if (strcmp(parts[i], "CONFIG") == 0) {
+        // Should I be increased if we cannot handle the argument?
+        if (strcmp(parts[++i], "GET") != 0) {
           printf("Unknown command\n");
           break;
         }
+
+        char *arg = parts[++i];
+        char *config_val = getConfig(ctx->config, arg);
+        if (config_val == NULL) {
+          printf("Unknown command\n");
+          break;
+        }
+
+        char *resps[2] = {arg, config_val};
+        send_response_array(ctx->conn_fd, resps, 2);
+      } else if (strcmp(parts[i], "INFO") == 0) {
+        i++;
+        if (strcmp(parts[i], "replication")) {
+          // no info other than replication supported
+          UNREACHABLE();
+        }
+        int size = 3;
+        char *msg;
+        char *resps[size];
+
+        char *role_info = malloc(11);
+        if (ctx->config->master_info != NULL) {
+          strcpy(role_info, "role:slave");
+        } else {
+          strcpy(role_info, "role:master");
+        }
+        resps[0] = role_info;
+
+        DEBUG_LOG("hi");
+        char *replid_info = malloc(strlen("master_replid:") +
+                                   strlen(ctx->config->master_replid) + 1);
+        strcpy(replid_info, "master_replid:");
+        strcat(replid_info, ctx->config->master_replid);
+        resps[1] = replid_info;
+
+        resps[2] = malloc(strlen("master_repl_offset:") + 20 + 1);
+        strcpy(resps[2], "master_repl_offset:");
+        char repl_offset[20];
+        sprintf(repl_offset, "%d", ctx->config->master_repl_offset);
+        strcat(resps[2], repl_offset);
+
+        // Allocate enough buffer for the whole message concatenated
+        int total_size = 0;
+        for (int i = 0; i < size; i++) {
+          // Plus 2 for the \n
+          total_size += strlen(resps[i]) + 2;
+        }
+        msg = malloc(total_size);
+
+        for (int i = 0; i < size; i++) {
+          strcat(msg, resps[i]);
+          if (i != size) {
+            strcat(msg, "\n");
+          }
+        }
+
+        send_response_bulk_string(ctx->conn_fd, msg);
+      } else if (strcmp(parts[i], "REPLCONF") == 0) {
+        i++;
+        if (strcmp(parts[i], "listening-port") == 0) {
+          i++;
+          int port = atoi(parts[i]);
+        } else if (strcmp(parts[i], "capa") == 0) {
+          i++;
+          if (strcmp(parts[i], "psync2") == 0) {
+          } else {
+            // Unsupported capability
+            printf("%s", parts[i]);
+            UNREACHABLE();
+          }
+        }
+        send_response(ctx->conn_fd, "+OK\r\n");
+      } else if (strcmp(parts[i], "PSYNC") == 0) {
+        i++;
+        if (strcmp(parts[i], "?") == 0) {
+          i++;
+          if (strcmp(parts[i], "-1") == 0) {
+            char response[100];
+            sprintf(response, "+FULLRESYNC %s 0\r\n",
+                    ctx->config->master_replid);
+            send_response(ctx->conn_fd, response);
+          }
+        }
+      } else {
+        printf("Unknown command\n");
+        break;
       }
-    } else if (bytes_received == 0) {
-      printf("Client did not send any data");
-      break;
-    } else {
-      perror("Could not read from connection");
     }
   }
-
   return NULL;
 }
 
