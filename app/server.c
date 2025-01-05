@@ -150,7 +150,7 @@ int handshake(Config *config) {
     exit(1);
   assert(strncmp(read_buffer, pongMsg, nbytes) == 0);
 
-  // Next inform the port
+  // Next send the REPLCONF
   char port[6];
   sprintf(port, "%d", config->port);
   char *repl_conf1[3] = {
@@ -176,6 +176,21 @@ int handshake(Config *config) {
   if (nbytes <= 0)
     exit(1);
   assert(strncmp(read_buffer, okMsg, nbytes) == 0);
+
+  // Next send the PYSNC
+
+  char *psync[3] = {
+      "PSYNC",
+      "?",
+      "-1",
+  };
+  send_response_array(master_fd, psync, 3);
+
+  nbytes = recv(master_fd, read_buffer, sizeof read_buffer, 0);
+  if (nbytes <= 0)
+    exit(1);
+  // Parse psync response later
+  // assert(strncmp(read_buffer, okMsg, nbytes) == 0);
 
   return 0;
 }
@@ -495,14 +510,14 @@ void *connection_handler(void *arg) {
         } else if (strcmp(parts[i], "CONFIG") == 0) {
           // Should I be increased if we cannot handle the argument?
           if (strcmp(parts[++i], "GET") != 0) {
-            perror("Unknown command\n");
+            printf("Unknown command\n");
             break;
           }
 
           char *arg = parts[++i];
           char *config_val = getConfig(ctx->config, arg);
           if (config_val == NULL) {
-            perror("Unknown command\n");
+            printf("Unknown command\n");
             break;
           }
 
@@ -572,7 +587,7 @@ void *connection_handler(void *arg) {
           send_response(ctx->conn_fd, "+OK\r\n");
 
         } else {
-          perror("Unknown command\n");
+          printf("Unknown command\n");
           break;
         }
       }
