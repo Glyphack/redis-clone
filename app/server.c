@@ -275,7 +275,6 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // config->master_replid = malloc(40);
   config->master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
   config->master_repl_offset = 0;
 
@@ -628,6 +627,7 @@ void *connection_handler(void *arg) {
       }
     }
   }
+  free(ctx);
   return NULL;
 }
 
