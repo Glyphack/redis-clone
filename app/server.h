@@ -23,6 +23,10 @@
 #define MAX_PATH 256
 #define MAX_METADATA_SIZE 100
 
+#define pongMsg "+PONG\r\n"
+#define pongMsg "+PONG\r\n"
+#define okMsg "+OK\r\n"
+
 
 #define DEBUG_PRINT(var, fmt) fprintf(stderr, "DEBUG: (%s:%d) %s = %" #fmt "\n", __FILE__, __LINE__, #var, var)
 #define DEBUG_LOG(msg) fprintf(stderr, "DEBUG: (%s:%d) %s\n", __FILE__, __LINE__, #msg)

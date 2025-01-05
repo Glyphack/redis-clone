@@ -1,4 +1,5 @@
 #include "server.h"
+#include "assert.h"
 #include "rdb.h"
 #include "vec.h"
 #include <arpa/inet.h>
@@ -122,40 +123,32 @@ void *getConfig(Config *config, char *name) {
 }
 
 int handshake(Config *config) {
-  int sock = 0;
+  int master_fd = 0;
   struct sockaddr_in serv_addr = *config->master_info;
   char *ping[1] = {"PING"};
+  char command[1000];
 
   // Create socket
-  if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+  if ((master_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
     printf("\n Socket creation error \n");
     return -1;
   }
 
   // Connect to the server
-  if (connect(sock, (struct sockaddr *)config->master_info, sizeof(serv_addr)) <
-      0) {
+  if (connect(master_fd, (struct sockaddr *)config->master_info,
+              sizeof(serv_addr)) < 0) {
     printf("Connection Failed");
     return -1;
   }
 
   // Initial handshake send a ping
-  send_response_array(sock, ping, 1);
+  send_response_array(master_fd, ping, 1);
 
-  // Closing the socket to avoid sending all the handshake data in one TCP
-  // packet. I don't know the right way
-  close(sock);
-
-  // Create socket
-  if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-    perror("Socket creation error");
-    return -1;
-  }
-  if (connect(sock, (struct sockaddr *)config->master_info, sizeof(serv_addr)) <
-      0) {
-    perror("Connection Failed");
-    return -1;
-  }
+  char read_buffer[100];
+  ssize_t nbytes = recv(master_fd, read_buffer, sizeof read_buffer, 0);
+  if (nbytes <= 0)
+    exit(1);
+  assert(strncmp(read_buffer, pongMsg, nbytes) == 0);
 
   // Next inform the port
   char port[6];
@@ -165,7 +158,24 @@ int handshake(Config *config) {
       "listening-port",
       port,
   };
-  send_response_array(sock, repl_conf1, 3);
+  send_response_array(master_fd, repl_conf1, 3);
+
+  nbytes = recv(master_fd, read_buffer, sizeof read_buffer, 0);
+  if (nbytes <= 0)
+    exit(1);
+  assert(strncmp(read_buffer, okMsg, nbytes) == 0);
+
+  char *repl_conf2[3] = {
+      "REPLCONF",
+      "capa",
+      "psync2",
+  };
+  send_response_array(master_fd, repl_conf2, 3);
+
+  nbytes = recv(master_fd, read_buffer, sizeof read_buffer, 0);
+  if (nbytes <= 0)
+    exit(1);
+  assert(strncmp(read_buffer, okMsg, nbytes) == 0);
 
   return 0;
 }
@@ -552,9 +562,10 @@ void *connection_handler(void *arg) {
             int port = atoi(parts[i]);
           } else if (strcmp(parts[i], "capa") == 0) {
             i++;
-            if (strcmp(parts[i++], " psync2") == 0) {
+            if (strcmp(parts[i], "psync2") == 0) {
             } else {
               // Unsupported capability
+              printf("%s", parts[i]);
               UNREACHABLE();
             }
           }
