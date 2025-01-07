@@ -1,4 +1,5 @@
 #include "server.h"
+#include "arena.h"
 #include "assert.h"
 #include "rdb.h"
 #include "vec.h"
@@ -94,7 +95,7 @@ char **hashmap_keys(HashMap *h) {
   return array;
 }
 
-void printConfig(Config *config) {
+void print_config(Config *config) {
   fprintf(stderr, "config:\n");
   fprintf(stderr, "  dir `%s`\n", config->dir);
   fprintf(stderr, "  dbfilename `%s`\n", config->dbfilename);
@@ -219,7 +220,9 @@ int main(int argc, char *argv[]) {
   setbuf(stdout, NULL);
   setbuf(stderr, NULL);
 
-  Config *config = (Config *)malloc(sizeof(Config));
+  Arena arena = arena_init(1024 * 1024);
+
+  Config *config = (Config *)aalloc(&arena, sizeof(Config));
   config->dbfilename = NULL;
   config->dir = NULL;
   config->port = 6379;
@@ -237,15 +240,13 @@ int main(int argc, char *argv[]) {
           perror("Could not open directory passed to -dir");
         }
         closedir(dp);
-        config->dir = (char *)malloc(strlen(flag_val));
+        config->dir = (char *)aalloc_str(&arena, strlen(flag_val));
         strcpy(config->dir, flag_val);
-        printf("dir: %s\n", flag_val);
       }
       if (strcmp(flag_name, "--dbfilename") == 0) {
         char *flag_val = argv[++i];
-        config->dbfilename = (char *)malloc(strlen(flag_val));
+        config->dbfilename = (char *)aalloc_str(&arena, strlen(flag_val));
         strcpy(config->dbfilename, flag_val);
-        printf("dbfilename: %s\n", flag_val);
       }
       if (strcmp(flag_name, "--test-rdb") == 0) {
         print_rdb_and_exit = 1;
@@ -257,7 +258,7 @@ int main(int argc, char *argv[]) {
       if (strcmp(flag_name, "--replicaof") == 0) {
         i++;
         struct sockaddr_in *serv_addr =
-            (struct sockaddr_in *)malloc(sizeof(struct sockaddr_in));
+            (struct sockaddr_in *)aalloc(&arena, sizeof(struct sockaddr_in));
         char *hostinfo = argv[i];
         char *host = strtok(hostinfo, " ");
         if (strcmp(host, "localhost") == 0) {
@@ -278,7 +279,7 @@ int main(int argc, char *argv[]) {
   config->master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
   config->master_repl_offset = 0;
 
-  printConfig(config);
+  print_config(config);
 
   HashMap *hashmap = hashmap_init();
 
@@ -353,6 +354,8 @@ int main(int argc, char *argv[]) {
     context->conn_fd = client_fd;
     context->hashmap = hashmap;
     context->config = config;
+    Arena thread_allocator = arena_init(1024 * 1024);
+    context->allocator = &thread_allocator;
     if (pthread_create(&thread_id, NULL, connection_handler, (void *)context) <
         0) {
       perror("Could not create thread");
@@ -454,7 +457,8 @@ void *connection_handler(void *arg) {
           size_section_len++;
           ch = request[size_start + size_section_len];
         }
-        char *msg_len_str = (char *)malloc(size_section_len * sizeof(char));
+        char *msg_len_str =
+            (char *)aalloc(ctx->allocator, size_section_len * sizeof(char));
         strncpy(msg_len_str, request + size_start, size_section_len);
         msg_len = atoi(msg_len_str);
         parts[part_index] = malloc((msg_len) * sizeof(char));
@@ -566,7 +570,6 @@ void *connection_handler(void *arg) {
         }
         resps[0] = role_info;
 
-        DEBUG_LOG("hi");
         char *replid_info = malloc(strlen("master_replid:") +
                                    strlen(ctx->config->master_replid) + 1);
         strcpy(replid_info, "master_replid:");
@@ -627,6 +630,7 @@ void *connection_handler(void *arg) {
       }
     }
   }
+  free(ctx->allocator->data);
   free(ctx);
   return NULL;
 }

@@ -1,9 +1,10 @@
 #ifndef SERVER_H
 #define SERVER_H
 
-#include "./vec.h"
-#include <sys/stat.h>
+#include "vec.h"
+#include "arena.h"
 
+#include <sys/stat.h>
 #include <dirent.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -85,6 +86,7 @@ typedef struct {
   int conn_fd;
   HashMap *hashmap;
   Config *config;
+  Arena *allocator;
 } Context;
 
 
