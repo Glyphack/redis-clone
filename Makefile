@@ -1,7 +1,7 @@
 CC = clang
 CFLAGS = -std=c23 -Wall -Wextra -O2
 
-OUTPUT ?= build/bin
+OUTPUT ?= bin
 
 build: app/*.c app/*.h
 	@$(CC) $(CFLAGS) app/*.c -o $(OUTPUT)

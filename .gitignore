@@ -52,4 +52,5 @@ Mkfile.old
 dkms.conf
 
 dump.rdb
-build/
+bin
+test/bin

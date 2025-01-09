@@ -1,19 +1,29 @@
 #include "arena.h"
 #include "stdlib.h"
+#include "types.h"
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 
-Arena arena_init(int sz) {
-  unsigned char *memory = malloc(sz);
-  Arena arena = {.data = memory, .length = sz, .offset = 0};
-  return arena;
+Arena newarena(size cap) {
+  Arena a = {0};
+  a.offset = malloc(cap);
+  a.begin = a.offset;
+  a.end = a.offset ? a.offset + cap : 0;
+  return a;
 }
 
-void *aalloc(Arena *a, size_t sz) {
-  if (a->offset + sz > a->length) {
-    return NULL; // Out of memory
+__attribute((malloc, alloc_align(3))) void *alloc(Arena *a, size sz, size align,
+                                                  size count) {
+  size padding = -(uptr)a->offset & (align - 1);
+  size available = a->end - a->offset - padding;
+  if (available < 0 || count > available / sz) {
+    printf("Out of memory");
+    abort();
   }
-  void *p = &a->data[a->offset];
-  a->offset += sz;
-  return p;
+  void *p = a->offset + padding;
+  a->offset += padding + count * sz;
+  return memset(p, 0, count * sz);
 }
 
-void *aalloc_str(Arena *a, size_t sz) { return aalloc(a, sz + 1); }
+void droparena(Arena *a) { free(a->begin); }

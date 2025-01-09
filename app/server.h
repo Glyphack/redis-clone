@@ -41,7 +41,7 @@
 
 typedef struct {
   char* data;
-  size_t len;
+  usize len;
 } Mystr;
 
 void print_mystr(Mystr *s);

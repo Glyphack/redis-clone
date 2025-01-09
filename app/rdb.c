@@ -1,4 +1,5 @@
 #include "rdb.h"
+#include "arena.h"
 #include "server.h"
 
 char *read_source_file(FILE *fp) {
@@ -99,13 +100,14 @@ int parse_rdb_len_encoding(char **cursor, int *special_format) {
   return len;
 }
 
-int parse_len_encoded_string(char **cursor, int size, AuxValue *aux_value) {
+int parse_len_encoded_string(Arena *arena, char **cursor, int size,
+                             AuxValue *aux_value) {
   char *p = *cursor;
   if (size <= 0) {
     fprintf(stderr, "invalid size %d\n", size);
     return 1;
   }
-  aux_value->str_value = (Mystr *)malloc(sizeof(Mystr));
+  aux_value->str_value = alloc(arena, sizeof(Mystr), alignof(Mystr), 1);
   aux_value->str_value->data = p;
   aux_value->str_value->len = size;
   p = p + size;
@@ -171,21 +173,19 @@ void print_rdb(const RdbContent *rdb) {
   }
 }
 
-RdbContent *parse_rdb(char *path) {
-  RdbContent *rdbContent = (RdbContent *)malloc(sizeof(RdbContent));
+RdbContent *parse_rdb(Arena *arena, char *path) {
+  RdbContent *rdbContent = new (arena, RdbContent);
   rdbContent->header = NULL;
   rdbContent->metadata = initialize_vec();
 
-  FILE *fp;
   char *content;
-  fp = fopen(path, "rb");
+  FILE *fp = fopen(path, "rb");
   if (fp == NULL) {
     printf("opening file: %s\n", path);
     perror("Error opening file");
     return NULL;
   }
   content = read_source_file(fp);
-  int content_size = strlen(content);
   char *p = content;
 
   // Keep track of what section of the rdb file we are at
@@ -211,20 +211,20 @@ RdbContent *parse_rdb(char *path) {
     if (1 == section_number) {
       DEBUG_LOG("reading metadata");
       while ((unsigned char)*p != 0xFE) {
-        AuxValue *name = (AuxValue *)malloc(sizeof(AuxValue));
-        AuxValue *value = (AuxValue *)malloc(sizeof(AuxValue));
+        AuxValue *name = new (arena, AuxValue);
+        AuxValue *value = new (arena, AuxValue);
         value->int_value = 0;
         value->str_value = NULL;
 
         // TODO error
         int special_format;
         int len = parse_rdb_len_encoding(&p, &special_format);
-        parse_len_encoded_string(&p, len, name);
+        parse_len_encoded_string(arena, &p, len, name);
         push_vec(rdbContent->metadata, name->str_value);
 
         len = parse_rdb_len_encoding(&p, &special_format);
         if (special_format == -1) {
-          parse_len_encoded_string(&p, len, value);
+          parse_len_encoded_string(arena, &p, len, value);
         } else {
           int result = parse_integer_encoded_as_string(&p, special_format);
           value->int_value = result;
@@ -251,7 +251,7 @@ RdbContent *parse_rdb(char *path) {
       rdbContent->databases = initialize_vec();
       DEBUG_LOG("reading database section");
       // TODO: There can be multiple databases
-      RdbDatabase *rdb_db = (RdbDatabase *)malloc(sizeof(RdbDatabase));
+      RdbDatabase *rdb_db = new (arena, RdbDatabase);
       rdb_db->data = hashmap_init();
       int special_format;
       int db_num = parse_rdb_len_encoding(&p, &special_format);
@@ -328,13 +328,13 @@ RdbContent *parse_rdb(char *path) {
           if (sf != -1) {
             UNREACHABLE();
           }
-          parse_len_encoded_string(&p, len, &key);
+          parse_len_encoded_string(arena, &p, len, &key);
           sf = 0;
           len = parse_rdb_len_encoding(&p, &sf);
           if (sf != -1) {
             UNREACHABLE();
           }
-          parse_len_encoded_string(&p, len, &value);
+          parse_len_encoded_string(arena, &p, len, &value);
           node->key = convertToCStr(key.str_value);
           node->val = convertToCStr(value.str_value);
           break;
