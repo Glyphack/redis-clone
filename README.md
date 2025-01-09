@@ -2,12 +2,10 @@
 
 My solution to ["Build Your Own Redis" Challenge](https://codecrafters.io/challenges/redis).
 
-
 ## Usage
 
 ```
-make build
-./run
+make run ARGS="--port 8080"
 ```
 
 In another window:

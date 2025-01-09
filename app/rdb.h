@@ -26,6 +26,6 @@ typedef struct RdbContent {
   vector *databases;
 }RdbContent;
 
-RdbContent *parse_rdb(char *path);
+RdbContent *parse_rdb(Arena *, char *);
 void print_rdb(const RdbContent*);
 #endif
