@@ -40,15 +40,4 @@ RespArray* parse_resp_array(Arena* arena, int client_fd);
 int send_response(int client_fd, const char* response);
 
 
-// Add these function prototypes at the top of the file
-void handle_echo(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_set(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_get(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_keys(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_ping(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_config(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_info(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_replconf(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_psync(Context *ctx, Arena *scratch, RespArray *request, int *i);
-
 #endif

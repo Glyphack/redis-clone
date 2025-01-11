@@ -1,5 +1,6 @@
 #include "rdb.h"
 #include "common.h"
+#include "types.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +14,7 @@ char *read_source_file(Arena *arena, FILE *fp) {
   if (fstat(fileno(fp), &st) == -1)
     goto ret;
 
-  data = alloc(arena, sizeof(char), alignof(char), st.st_size + 1);
+  data = new(arena, byte, st.st_size + 1);
   if (!data)
     goto ret;
 
@@ -111,7 +112,7 @@ int parse_len_encoded_string(Arena *arena, char **cursor, int size,
     fprintf(stderr, "invalid size %d\n", size);
     return 1;
   }
-  aux_value->str_value = alloc(arena, sizeof(Mystr), alignof(Mystr), 1);
+  aux_value->str_value = new (arena, Mystr);
   aux_value->str_value->data = p;
   aux_value->str_value->len = size;
   p = p + size;
@@ -295,7 +296,7 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
 
         HashMapNode *node = hashmap_node_init(arena);
         switch (value_type) {
-        case 0:
+        case 0: ; // cannot define after case
           AuxValue key, value;
           int sf, len;
           len = parse_rdb_len_encoding(&p, &sf);
