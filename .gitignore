@@ -51,6 +51,8 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
+.cache
+
 dump.rdb
 bin
 test/bin

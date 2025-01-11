@@ -1,0 +1,12 @@
+CompileFlags:
+  Add: [-std=c23, -Wall, -Wextra, -O2]
+  Remove: [-std=gnu++*]
+  
+Diagnostics:
+  UnusedParameter: Suppress
+  
+Index:
+  Background: Build
+
+Style:
+  FullyQualifiedNamespaces: false 
