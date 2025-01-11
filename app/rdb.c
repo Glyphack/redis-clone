@@ -1,15 +1,19 @@
 #include "rdb.h"
-#include "arena.h"
-#include "server.h"
+#include "common.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
-char *read_source_file(FILE *fp) {
+char *read_source_file(Arena *arena, FILE *fp) {
   char *data = NULL;
   struct stat st;
 
   if (fstat(fileno(fp), &st) == -1)
     goto ret;
 
-  data = calloc(st.st_size + 1, sizeof(char));
+  data = alloc(arena, sizeof(char), alignof(char), st.st_size + 1);
   if (!data)
     goto ret;
 
@@ -185,17 +189,18 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
     perror("Error opening file");
     return NULL;
   }
-  content = read_source_file(fp);
+  content = read_source_file(arena, fp);
+  if (content == NULL) {
+    fclose(fp);
+    return NULL;
+  }
   char *p = content;
 
-  // Keep track of what section of the rdb file we are at
-  // Starting at 0 which is the header, the first section.
   int section_number = 0;
 
   while (*p != '\0') {
     if (0 == section_number) {
-      Mystr *header = new_mystr();
-      DEBUG_LOG("reading header");
+      Mystr *header = new (arena, Mystr);
       header->data = p;
       int header_len = 0;
       while ((unsigned char)*p != 0xFA) {
@@ -205,18 +210,15 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
       header->len = header_len;
       rdbContent->header = header;
       section_number++;
-      // Consuming the fa
       p++;
     }
     if (1 == section_number) {
-      DEBUG_LOG("reading metadata");
       while ((unsigned char)*p != 0xFE) {
         AuxValue *name = new (arena, AuxValue);
         AuxValue *value = new (arena, AuxValue);
         value->int_value = 0;
         value->str_value = NULL;
 
-        // TODO error
         int special_format;
         int len = parse_rdb_len_encoding(&p, &special_format);
         parse_len_encoded_string(arena, &p, len, name);
@@ -236,7 +238,6 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
         } else {
           if ((unsigned char)*p == 0xFE) {
             section_number++;
-            // Consume FE
             p++;
             break;
           }
@@ -246,22 +247,17 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
       }
     }
 
-    // Database Selection
     if (2 == section_number) {
       rdbContent->databases = initialize_vec();
-      DEBUG_LOG("reading database section");
-      // TODO: There can be multiple databases
       RdbDatabase *rdb_db = new (arena, RdbDatabase);
-      rdb_db->data = hashmap_init();
+      rdb_db->data = hashmap_init(arena);
       int special_format;
       int db_num = parse_rdb_len_encoding(&p, &special_format);
       if (special_format != -1) {
         fprintf(stderr, "expected special format to be 0 for database id");
       }
       rdb_db->num = db_num;
-      // resizedb information
       if ((unsigned char)*p == 0xFB) {
-        // Consume FB
         p++;
         int sf;
         int db_hash_size = parse_rdb_len_encoding(&p, &sf);
@@ -272,18 +268,14 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
         if (sf != -1) {
           fprintf(stderr, "expected special format to be 0 for database id");
         }
-        // The sizes are always integers
         rdb_db->resizedb_hash = db_hash_size;
         rdb_db->resizedb_expiry = db_expiry_size;
       }
 
-      // read db keys
-      DEBUG_LOG("reading key val section");
       while ((unsigned char)*p != 0xFE && (unsigned char)*p != 0xFF) {
         int expire_time_kind = RDB_KEY_EXP_KIND_NO_TTL;
         int64_t expire_time = -1;
 
-        // "expiry time in seconds", followed by 4 byte unsigned int
         if ((unsigned char)*p == 0xFD) {
           p++;
           expire_time_kind = RDB_KEY_EXP_KIND_S;
@@ -291,7 +283,6 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
           p += 4;
         }
 
-        // "expiry time in ms", followed by 8 byte unsigned long
         if ((unsigned char)*p == 0xFC) {
           p++;
           expire_time_kind = RDB_KEY_EXP_KIND_MS;
@@ -299,29 +290,12 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
           p += 8;
         }
 
-        DEBUG_PRINT(expire_time, lld);
-
-        // 0 = String Encoding
-        // 1 = List Encoding
-        // 2 = Set Encoding
-        // 3 = Sorted Set Encoding
-        // 4 = Hash Encoding
-        // 9 = Zipmap Encoding
-        // 10 = Ziplist Encoding
-        // 11 = Intset Encoding
-        // 12 = Sorted Set in Ziplist Encoding
-        // 13 = Hashmap in Ziplist Encoding (Introduced in RDB version 4)
-        // 14 = List in Quicklist encoding (Introduced in RDB version 7)
         int value_type = (int)*p;
-
-        DEBUG_PRINT((int)*p, d);
-        // read type
         p++;
 
-        HashMapNode *node = hashmap_node_init();
+        HashMapNode *node = hashmap_node_init(arena);
         switch (value_type) {
         case 0:
-          DEBUG_LOG("key type string");
           AuxValue key, value;
           int sf, len;
           len = parse_rdb_len_encoding(&p, &sf);
@@ -365,19 +339,15 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
       push_vec(rdbContent->databases, rdb_db);
 
       if ((unsigned char)*p == 0xFE) {
-        // TODO: Support more than 1 database section
         UNREACHABLE();
       }
 
-      // End of RDB
       if ((unsigned char)*p == 0xFF) {
         section_number++;
       }
     }
 
-    // end of RDB
     if (3 == section_number) {
-      // CRC checksum
       p += 8;
     }
     p++;
