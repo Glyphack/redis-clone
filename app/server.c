@@ -473,142 +473,23 @@ void *connection_handler(void *arg) {
 
     for (int i = 0; i < request->count; i++) {
       if (strncmp(request->parts[i], "ECHO", 4) == 0) {
-        printf("responding to echo\n");
-        i++;
-        if (i < request->count) {
-          send_response_bulk_string(ctx->conn_fd, request->parts[i]);
-        }
+        handle_echo(ctx, &scratch, request, &i);
       } else if (strncmp(request->parts[i], "SET", 3) == 0) {
-        printf("responding to set\n");
-        char *key = request->parts[++i];
-        char *val = request->parts[++i];
-        long long ttl = -1;
-        if (request->count > i + 1) {
-          if (strcmp(request->parts[++i], "px") != 0) {
-            printf("unknown command arguments");
-            break;
-          }
-          long long current_time = get_current_time();
-          printf("current time: %lld\n", current_time);
-          ttl = current_time + atoi(request->parts[++i]);
-        }
-        printf("ttl: %lld", ttl);
-        HashMapNode *hNode = hashmap_node_init(ctx->main_arena);
-        strcpy(hNode->key, key);
-        strcpy(hNode->val, val);
-        hNode->ttl = ttl;
-        hashmap_insert(ctx->hashmap, hNode);
-        send_response_bulk_string(ctx->conn_fd, "OK");
+        handle_set(ctx, &scratch, request, &i);
       } else if (strncmp(request->parts[i], "GET", 3) == 0) {
-        printf("responding to get\n");
-        char *key = request->parts[++i];
-        HashMapNode *node = hashmap_get(ctx->hashmap, key);
-        if (node == NULL) {
-          respond_null(ctx->conn_fd);
-          continue;
-        }
-        long long current_time = get_current_time();
-        printf("current time: %lld", current_time);
-        if (node->ttl < current_time && node->ttl != -1) {
-          printf("item expired ttl: %lld \n", node->ttl);
-          respond_null(ctx->conn_fd);
-          continue;
-        }
-        send_response_bulk_string(ctx->conn_fd, node->val);
+        handle_get(ctx, &scratch, request, &i);
       } else if (strncmp(request->parts[i], "KEYS", 4) == 0) {
-        char *pattern = request->parts[++i];
-        if (strncmp(pattern, "*", 1) != 0) {
-          printf("unrecognized pattern");
-          exit(1);
-        }
-        printf("responding to keys\n");
-        char **keys = hashmap_keys(ctx->hashmap);
-        if (keys == NULL) {
-          respond_null(ctx->conn_fd);
-          continue;
-        }
-        send_response_array(ctx->conn_fd, keys, ctx->hashmap->size);
+        handle_keys(ctx, &scratch, request, &i);
       } else if (strncmp(request->parts[i], "PING", 4) == 0) {
-        printf("responding to ping\n");
-        send_response(ctx->conn_fd, pongMsg);
+        handle_ping(ctx, &scratch, request, &i);
       } else if (strcmp(request->parts[i], "CONFIG") == 0) {
-        if (strcmp(request->parts[++i], "GET") != 0) {
-          printf("Unknown config argument\n");
-          break;
-        }
-        char *arg = request->parts[++i];
-        char *config_val = getConfig(ctx->config, arg);
-        if (config_val == NULL) {
-          fprintf(stderr, "Unknown Config %s\n", arg);
-          break;
-        }
-        char *resps[2] = {arg, config_val};
-        send_response_array(ctx->conn_fd, resps, 2);
+        handle_config(ctx, &scratch, request, &i);
       } else if (strcmp(request->parts[i], "INFO") == 0) {
-        fprintf(stderr, "responding to INFO\n");
-        i++;
-        if (strcmp(request->parts[i], "replication")) {
-          // no info other than replication supported
-          UNREACHABLE();
-        }
-        int total_size =
-            13; // "role:master\n" or "role:slave\n" (12 chars + \n)
-        total_size += strlen("master_replid:") + 20 + 1; // replid info + \n
-        total_size +=
-            strlen("master_repl_offset:") + 20 + 1; // offset info + \n
-        total_size += 1;                            // null terminator
-
-        char *response = new (&scratch, byte, total_size);
-        int offset = 0;
-
-        offset +=
-            sprintf(response + offset, "role:%s\n",
-                    ctx->config->master_info != NULL ? "slave" : "master");
-        offset += sprintf(response + offset, "master_replid:%s\n",
-                          ctx->config->master_replid);
-        offset += sprintf(response + offset, "master_repl_offset:%d\n",
-                          ctx->config->master_repl_offset);
-
-        send_response_bulk_string(ctx->conn_fd, response);
-      } else if (strcmp(request->parts[i], "INFO") == 0) {
-        fprintf(stderr, "responding to INFO\n");
-        i++;
-        if (strcmp(request->parts[i], "replication") != 0) {
-          // no info other than replication supported
-          UNREACHABLE();
-        }
-
-        char response[256];
-        snprintf(response, sizeof(response),
-                 "+role:%s\nmaster_replid:%s\nmaster_repl_offset:%d\r\n",
-                 ctx->config->master_info != NULL ? "slave" : "master",
-                 ctx->config->master_replid, ctx->config->master_repl_offset);
-
-        send_response(ctx->conn_fd, response);
+        handle_info(ctx, &scratch, request, &i);
       } else if (strcmp(request->parts[i], "REPLCONF") == 0) {
-        i++;
-        if (strcmp(request->parts[i], "listening-port") == 0) {
-          i++;
-          // TODO: Store port
-        } else if (strcmp(request->parts[i], "capa") == 0) {
-          i++;
-          if (strcmp(request->parts[i], "psync2") != 0) {
-            printf("%s is not supported", request->parts[i]);
-            UNREACHABLE();
-          }
-        }
-        send_response(ctx->conn_fd, okMsg);
+        handle_replconf(ctx, &scratch, request, &i);
       } else if (strcmp(request->parts[i], "PSYNC") == 0) {
-        i++;
-        if (strcmp(request->parts[i], "?") == 0) {
-          i++;
-          if (strcmp(request->parts[i], "-1") == 0) {
-            char response[100];
-            sprintf(response, "+FULLRESYNC %s 0\r\n",
-                    ctx->config->master_replid);
-            send_response(ctx->conn_fd, response);
-          }
-        }
+        handle_psync(ctx, &scratch, request, &i);
       } else {
         printf("Unknown command %s\n", request->parts[i]);
         keep_alive = 0;
@@ -619,6 +500,142 @@ void *connection_handler(void *arg) {
   droparena(ctx->thread_allocator);
   free(ctx);
   return NULL;
+}
+
+void handle_echo(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+  printf("responding to echo\n");
+  (*i)++;
+  if (*i < request->count) {
+    send_response_bulk_string(ctx->conn_fd, request->parts[*i]);
+  }
+}
+
+void handle_set(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+  printf("responding to set\n");
+  char *key = request->parts[++(*i)];
+  char *val = request->parts[++(*i)];
+  long long ttl = -1;
+  if (request->count > *i + 1) {
+    if (strcmp(request->parts[++(*i)], "px") != 0) {
+      printf("unknown command arguments");
+      return;
+    }
+    long long current_time = get_current_time();
+    printf("current time: %lld\n", current_time);
+    ttl = current_time + atoi(request->parts[++(*i)]);
+  }
+  printf("ttl: %lld", ttl);
+  HashMapNode *hNode = hashmap_node_init(ctx->main_arena);
+  strcpy(hNode->key, key);
+  strcpy(hNode->val, val);
+  hNode->ttl = ttl;
+  hashmap_insert(ctx->hashmap, hNode);
+  send_response_bulk_string(ctx->conn_fd, "OK");
+}
+
+void handle_get(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+  printf("responding to get\n");
+  char *key = request->parts[++(*i)];
+  HashMapNode *node = hashmap_get(ctx->hashmap, key);
+  if (node == NULL) {
+    respond_null(ctx->conn_fd);
+    return;
+  }
+  long long current_time = get_current_time();
+  printf("current time: %lld", current_time);
+  if (node->ttl < current_time && node->ttl != -1) {
+    printf("item expired ttl: %lld \n", node->ttl);
+    respond_null(ctx->conn_fd);
+    return;
+  }
+  send_response_bulk_string(ctx->conn_fd, node->val);
+}
+
+void handle_keys(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+  char *pattern = request->parts[++(*i)];
+  if (strncmp(pattern, "*", 1) != 0) {
+    printf("unrecognized pattern");
+    exit(1);
+  }
+  printf("responding to keys\n");
+  char **keys = hashmap_keys(ctx->hashmap);
+  if (keys == NULL) {
+    respond_null(ctx->conn_fd);
+    return;
+  }
+  send_response_array(ctx->conn_fd, keys, ctx->hashmap->size);
+}
+
+void handle_ping(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+  printf("responding to ping\n");
+  send_response(ctx->conn_fd, pongMsg);
+}
+
+void handle_config(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+  if (strcmp(request->parts[++(*i)], "GET") != 0) {
+    printf("Unknown config argument\n");
+    return;
+  }
+  char *arg = request->parts[++(*i)];
+  char *config_val = getConfig(ctx->config, arg);
+  if (config_val == NULL) {
+    fprintf(stderr, "Unknown Config %s\n", arg);
+    return;
+  }
+  char *resps[2] = {arg, config_val};
+  send_response_array(ctx->conn_fd, resps, 2);
+}
+
+void handle_info(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+  fprintf(stderr, "responding to INFO\n");
+  (*i)++;
+  if (strcmp(request->parts[*i], "replication")) {
+    // no info other than replication supported
+    UNREACHABLE();
+  }
+  int total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
+  total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
+  total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
+  total_size += 1;                                      // null terminator
+
+  char *response = new (scratch, byte, total_size);
+  int offset = 0;
+
+  offset += sprintf(response + offset, "role:%s\n",
+                    ctx->config->master_info != NULL ? "slave" : "master");
+  offset += sprintf(response + offset, "master_replid:%s\n",
+                    ctx->config->master_replid);
+  offset += sprintf(response + offset, "master_repl_offset:%d\n",
+                    ctx->config->master_repl_offset);
+
+  send_response_bulk_string(ctx->conn_fd, response);
+}
+
+void handle_replconf(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+  (*i)++;
+  if (strcmp(request->parts[*i], "listening-port") == 0) {
+    (*i)++;
+    // TODO: Store port
+  } else if (strcmp(request->parts[*i], "capa") == 0) {
+    (*i)++;
+    if (strcmp(request->parts[*i], "psync2") != 0) {
+      printf("%s is not supported", request->parts[*i]);
+      UNREACHABLE();
+    }
+  }
+  send_response(ctx->conn_fd, okMsg);
+}
+
+void handle_psync(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+  (*i)++;
+  if (strcmp(request->parts[*i], "?") == 0) {
+    (*i)++;
+    if (strcmp(request->parts[*i], "-1") == 0) {
+      char response[100];
+      sprintf(response, "+FULLRESYNC %s 0\r\n", ctx->config->master_replid);
+      send_response(ctx->conn_fd, response);
+    }
+  }
 }
 
 void print_mystr(Mystr *s) {
