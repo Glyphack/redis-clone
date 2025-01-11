@@ -28,6 +28,7 @@ typedef struct {
     Arena* thread_allocator;
     Arena* main_arena;
     vector* replicas;
+    int is_connection_to_master;
 } Context;
 
 typedef struct {

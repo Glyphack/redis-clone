@@ -20,8 +20,8 @@ typedef struct {
 } HashMap;
 
 // Function declarations
-HashMap* hashmap_init(Arena* arena);
-HashMapNode* hashmap_node_init(Arena* arena);
+HashMap* hashmap_init();
+HashMapNode* hashmap_node_init();
 void hashmap_insert(HashMap* h, HashMapNode* node);
 HashMapNode* hashmap_get(HashMap* h, char* key);
 char** hashmap_keys(HashMap* h);

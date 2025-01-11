@@ -209,7 +209,7 @@ int main(int argc, char *argv[]) {
 
     print_config(config);
 
-    HashMap *hashmap = hashmap_init(&arena);
+    HashMap *hashmap = hashmap_init();
 
     if (config->dir && config->dbfilename) {
         char full_path[MAX_PATH];
@@ -269,14 +269,15 @@ int main(int argc, char *argv[]) {
         }
 
         pthread_t replication_thread_id;
-        Arena    *thread_allocator = new (&arena, Arena);
-        *thread_allocator          = newarena(10 * 1024 * 1024);
-        Context *context           = malloc(sizeof(Context));
-        context->conn_fd           = master_fd;
-        context->hashmap           = hashmap;
-        context->config            = config;
-        context->thread_allocator  = thread_allocator;
-        context->main_arena        = &arena;
+        Arena    *thread_allocator       = new (&arena, Arena);
+        *thread_allocator                = newarena(10 * 1024 * 1024);
+        Context *context                 = malloc(sizeof(Context));
+        context->conn_fd                 = master_fd;
+        context->hashmap                 = hashmap;
+        context->config                  = config;
+        context->thread_allocator        = thread_allocator;
+        context->main_arena              = &arena;
+        context->is_connection_to_master = 1;
         if (pthread_create(&replication_thread_id, NULL, connection_handler, context) < 0) {
             perror("Could not create thread");
             return 1;
@@ -294,15 +295,16 @@ int main(int argc, char *argv[]) {
 
     int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
     while (client_fd) {
-        Arena *thread_allocator   = new (&arena, Arena);
-        *thread_allocator         = newarena(10 * 1024 * 1024);
-        Context *context          = malloc(sizeof(Context));
-        context->conn_fd          = client_fd;
-        context->hashmap          = hashmap;
-        context->config           = config;
-        context->replicas         = replicas;
-        context->thread_allocator = thread_allocator;
-        context->main_arena       = &arena;
+        Arena *thread_allocator          = new (&arena, Arena);
+        *thread_allocator                = newarena(10 * 1024 * 1024);
+        Context *context                 = malloc(sizeof(Context));
+        context->conn_fd                 = client_fd;
+        context->hashmap                 = hashmap;
+        context->config                  = config;
+        context->replicas                = replicas;
+        context->thread_allocator        = thread_allocator;
+        context->main_arena              = &arena;
+        context->is_connection_to_master = 0;
         if (pthread_create(&thread_id, NULL, connection_handler, context) < 0) {
             perror("Could not create thread");
             return 1;
@@ -374,6 +376,12 @@ void send_response_array(int client_fd, char **items, int size) {
     send_response(client_fd, response);
 }
 
+// TODO: split to two functions.
+// 1. parse_resp_array that takes in a char* and parses it as resp array. It returns the RespArray
+// strcuct.
+// 2. read_resp_array_from_socket: that takes a client_fd and reads chunk by chunk and uses the
+// parse_resp_array to parse it. If the response is not completed it reads more and then parses it
+// again until it has full response.
 RespArray *parse_resp_array(Arena *arena, int client_fd) {
     RespArray *array = new (arena, RespArray);
     array->parts     = NULL;
@@ -412,19 +420,28 @@ RespArray *parse_resp_array(Arena *arena, int client_fd) {
         return array;
     }
 
-    printf("Received request: `%s`\n", request);
+    printf("Received request: `%s` size: `%d`\n", request, total_received);
+
+    array->raw = request;
+
+    int cursor = 0;
+
+    // RDB transfer
+    // TODO: rdb transfer is being ignored
+    while (request[0] != '*') {
+        request++;
+    }
 
     // Parse the array length from the first line
-    if (request[0] != '*') {
+    if (request[cursor] != '*') {
         array->error = 1;
         return array;
     }
+    cursor++;
 
-    array->count = atoi(&request[1]);
+    array->count = atoi(&request[cursor]);
     array->parts = new (arena, char *, array->count);
-    array->raw   = buffer;
 
-    int cursor     = 0;
     int part_index = 0;
 
     // Skip first line
@@ -489,11 +506,15 @@ void handle_set(Context *ctx, Arena *scratch, RespArray *request, int *i) {
         ttl = current_time + atoi(request->parts[++(*i)]);
     }
     DEBUG_PRINT(ttl, lld);
-    HashMapNode *hNode = hashmap_node_init(ctx->main_arena);
+    HashMapNode *hNode = hashmap_node_init();
     strcpy(hNode->key, key);
     strcpy(hNode->val, val);
     hNode->ttl = ttl;
+    // TODO: add this logic to not respond to all write commands
     hashmap_insert(ctx->hashmap, hNode);
+    if (ctx->is_connection_to_master) {
+        return;
+    }
     send_response_bulk_string(ctx->conn_fd, "OK");
 }
 
@@ -616,10 +637,9 @@ void *connection_handler(void *arg) {
     int keep_alive = 1;
 
     // If a replica talks in this connection the information will be recorded.
-    ReplicaConfig *replica = new (ctx->main_arena, ReplicaConfig, 1);
+    ReplicaConfig *replica = (ReplicaConfig *) malloc(sizeof(ReplicaConfig));
 
     while (keep_alive) {
-        // Reuse arena for each command/response
         RespArray *request = parse_resp_array(ctx->thread_allocator, client_fd);
         if (request->error) {
             break;
@@ -633,11 +653,15 @@ void *connection_handler(void *arg) {
                 handle_echo(ctx, ctx->thread_allocator, request, &arg_index);
             } else if (strncmp(request->parts[arg_index], "SET", 3) == 0) {
                 handle_set(ctx, ctx->thread_allocator, request, &arg_index);
-                for (int i = 0; i < ctx->replicas->total; i++) {
-                    ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
-                    if (replica_to_send->handskahe_done == 1) {
-                        printf("propagating command to replica %d\n", replica_to_send->port);
-                        send_response(replica_to_send->conn_fd, request->raw);
+                // TODO: extract this to a function and perform on all write operations
+                // Do not propagate from replicas
+                if (ctx->replicas != NULL) {
+                    for (int i = 0; i < ctx->replicas->total; i++) {
+                        ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
+                        if (replica_to_send->handskahe_done == 1) {
+                            printf("propagating command to replica %d\n", replica_to_send->port);
+                            send_response(replica_to_send->conn_fd, request->raw);
+                        }
                     }
                 }
 
@@ -671,6 +695,7 @@ void *connection_handler(void *arg) {
                 char *result = new (ctx->thread_allocator, byte, 1024);
                 snprintf(result, 1024, "$%lu\r\n%s", strlen(rdbContent), rdbContent);
                 send_response(ctx->conn_fd, result);
+                recv(ctx->conn_fd, 0, 0, 0);
             } else {
                 printf("Unknown command %s\n", request->parts[arg_index]);
                 keep_alive = 0;
