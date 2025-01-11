@@ -3,6 +3,7 @@
 
 #include "arena.h"
 #include "hashmap.h"
+#include "vec.h"
 #include <netinet/in.h>
 
 #define RESPONSE_ITEM_MAX_SIZE 1024
@@ -26,9 +27,11 @@ typedef struct {
     Config* config;
     Arena* thread_allocator;
     Arena* main_arena;
+    vector* replicas;
 } Context;
 
 typedef struct {
+    char* raw;
     char** parts;
     int count;
     int error;

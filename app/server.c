@@ -141,7 +141,7 @@ int handshake(Config *config) {
     }
     DEBUG_PRINT(repl_offset, d);
 
-    return 0;
+    return master_fd;
 }
 
 int main(int argc, char *argv[]) {
@@ -262,25 +262,45 @@ int main(int argc, char *argv[]) {
     }
 
     if (config->master_info != NULL) {
-        if (handshake(config) == -1) {
+        int master_fd = handshake(config);
+        if (master_fd == -1) {
             printf("handshake failed\n");
             exit(1);
         }
+
+        pthread_t replication_thread_id;
+        Arena    *thread_allocator = new (&arena, Arena);
+        *thread_allocator          = newarena(10 * 1024 * 1024);
+        Context *context           = malloc(sizeof(Context));
+        context->conn_fd           = master_fd;
+        context->hashmap           = hashmap;
+        context->config            = config;
+        context->thread_allocator  = thread_allocator;
+        context->main_arena        = &arena;
+        if (pthread_create(&replication_thread_id, NULL, connection_handler, context) < 0) {
+            perror("Could not create thread");
+            return 1;
+        }
         printf("handshake with master succeeded\n");
+        printf("connection handler thread created for replication %lu\n",
+               (unsigned long) replication_thread_id);
     }
 
     printf("Waiting for a client to connect...\n");
     client_addr_len = sizeof(client_addr);
     pthread_t thread_id;
 
+    vector *replicas = initialize_vec();
+
     int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
     while (client_fd) {
+        Arena *thread_allocator   = new (&arena, Arena);
+        *thread_allocator         = newarena(10 * 1024 * 1024);
         Context *context          = malloc(sizeof(Context));
         context->conn_fd          = client_fd;
         context->hashmap          = hashmap;
         context->config           = config;
-        Arena *thread_allocator   = new (&arena, Arena);
-        *thread_allocator         = newarena(10 * 1024 * 1024);
+        context->replicas         = replicas;
         context->thread_allocator = thread_allocator;
         context->main_arena       = &arena;
         if (pthread_create(&thread_id, NULL, connection_handler, context) < 0) {
@@ -402,6 +422,7 @@ RespArray *parse_resp_array(Arena *arena, int client_fd) {
 
     array->count = atoi(&request[1]);
     array->parts = new (arena, char *, array->count);
+    array->raw   = buffer;
 
     int cursor     = 0;
     int part_index = 0;
@@ -467,7 +488,7 @@ void handle_set(Context *ctx, Arena *scratch, RespArray *request, int *i) {
         printf("current time: %lld\n", current_time);
         ttl = current_time + atoi(request->parts[++(*i)]);
     }
-    printf("ttl: %lld", ttl);
+    DEBUG_PRINT(ttl, lld);
     HashMapNode *hNode = hashmap_node_init(ctx->main_arena);
     strcpy(hNode->key, key);
     strcpy(hNode->val, val);
@@ -556,6 +577,7 @@ void handle_info(Context *ctx, Arena *scratch, RespArray *request, int *i) {
 typedef struct {
     int port;
     int handskahe_done;
+    int conn_fd;
 } ReplicaConfig;
 
 void handle_replconf(Context *ctx, Arena *scratch, RespArray *request, int *i,
@@ -594,7 +616,7 @@ void *connection_handler(void *arg) {
     int keep_alive = 1;
 
     // If a replica talks in this connection the information will be recorded.
-    ReplicaConfig replica;
+    ReplicaConfig *replica = new (ctx->main_arena, ReplicaConfig, 1);
 
     while (keep_alive) {
         // Reuse arena for each command/response
@@ -606,26 +628,37 @@ void *connection_handler(void *arg) {
         DEBUG_LOG("parsed request");
         DEBUG_PRINT(request->count, d);
 
-        for (int i = 0; i < request->count; i++) {
-            if (strncmp(request->parts[i], "ECHO", 4) == 0) {
-                handle_echo(ctx, ctx->thread_allocator, request, &i);
-            } else if (strncmp(request->parts[i], "SET", 3) == 0) {
-                handle_set(ctx, ctx->thread_allocator, request, &i);
-            } else if (strncmp(request->parts[i], "GET", 3) == 0) {
-                handle_get(ctx, ctx->thread_allocator, request, &i);
-            } else if (strncmp(request->parts[i], "KEYS", 4) == 0) {
-                handle_keys(ctx, ctx->thread_allocator, request, &i);
-            } else if (strncmp(request->parts[i], "PING", 4) == 0) {
-                handle_ping(ctx, ctx->thread_allocator, request, &i);
-            } else if (strcmp(request->parts[i], "CONFIG") == 0) {
-                handle_config(ctx, ctx->thread_allocator, request, &i);
-            } else if (strcmp(request->parts[i], "INFO") == 0) {
-                handle_info(ctx, ctx->thread_allocator, request, &i);
-            } else if (strcmp(request->parts[i], "REPLCONF") == 0) {
-                handle_replconf(ctx, ctx->thread_allocator, request, &i, &replica);
-            } else if (strcmp(request->parts[i], "PSYNC") == 0) {
-                handle_psync(ctx, ctx->thread_allocator, request, &i);
-                printf("handshake with replica at %d done.", replica.port);
+        for (int arg_index = 0; arg_index < request->count; arg_index++) {
+            if (strncmp(request->parts[arg_index], "ECHO", 4) == 0) {
+                handle_echo(ctx, ctx->thread_allocator, request, &arg_index);
+            } else if (strncmp(request->parts[arg_index], "SET", 3) == 0) {
+                handle_set(ctx, ctx->thread_allocator, request, &arg_index);
+                for (int i = 0; i < ctx->replicas->total; i++) {
+                    ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
+                    if (replica_to_send->handskahe_done == 1) {
+                        printf("propagating command to replica %d\n", replica_to_send->port);
+                        send_response(replica_to_send->conn_fd, request->raw);
+                    }
+                }
+
+            } else if (strncmp(request->parts[arg_index], "GET", 3) == 0) {
+                handle_get(ctx, ctx->thread_allocator, request, &arg_index);
+            } else if (strncmp(request->parts[arg_index], "KEYS", 4) == 0) {
+                handle_keys(ctx, ctx->thread_allocator, request, &arg_index);
+            } else if (strncmp(request->parts[arg_index], "PING", 4) == 0) {
+                handle_ping(ctx, ctx->thread_allocator, request, &arg_index);
+            } else if (strcmp(request->parts[arg_index], "CONFIG") == 0) {
+                handle_config(ctx, ctx->thread_allocator, request, &arg_index);
+            } else if (strcmp(request->parts[arg_index], "INFO") == 0) {
+                handle_info(ctx, ctx->thread_allocator, request, &arg_index);
+            } else if (strcmp(request->parts[arg_index], "REPLCONF") == 0) {
+                handle_replconf(ctx, ctx->thread_allocator, request, &arg_index, replica);
+            } else if (strcmp(request->parts[arg_index], "PSYNC") == 0) {
+                handle_psync(ctx, ctx->thread_allocator, request, &arg_index);
+                printf("handshake with replica at %d done.\n", replica->port);
+                replica->handskahe_done = 1;
+                replica->conn_fd        = ctx->conn_fd;
+                push_vec(ctx->replicas, replica);
                 // transfer rdb
                 char *rdbContent = new (ctx->thread_allocator, byte, 1024);
                 char *hexString = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469"
@@ -639,7 +672,7 @@ void *connection_handler(void *arg) {
                 snprintf(result, 1024, "$%lu\r\n%s", strlen(rdbContent), rdbContent);
                 send_response(ctx->conn_fd, result);
             } else {
-                printf("Unknown command %s\n", request->parts[i]);
+                printf("Unknown command %s\n", request->parts[arg_index]);
                 keep_alive = 0;
             }
         }
