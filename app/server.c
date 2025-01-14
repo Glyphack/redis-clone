@@ -4,6 +4,7 @@
 #include "common.h"
 #include "hashmap.h"
 #include "rdb.h"
+#include "str.h"
 #include "types.h"
 #include "vec.h"
 
@@ -122,6 +123,7 @@ int handshake(Config *config) {
     if (nbytes <= 0)
         exit(1);
     printf("%s", tmp_str);
+    // TODO: strtok unsafe do not use it
     char *parts = strtok(tmp_str, " ");
     assert(strcmp(parts, "+FULLRESYNC") == 0);
     parts = strtok(NULL, " ");
@@ -376,134 +378,124 @@ void send_response_array(int client_fd, char **items, int size) {
     send_response(client_fd, response);
 }
 
+char getNextChar(RequestParserBuffer *buffer) {
+    if (buffer->cursor < buffer->length) {
+        char c = buffer->buffer[buffer->cursor];
+        buffer->cursor++;
+        return c;
+    }
+    int bytes_received;
+
+    bytes_received = recv(buffer->client_fd, buffer->buffer, buffer->capacity, 0);
+    if (bytes_received <= 0) {
+        // TODO another way
+        return '^';
+    }
+    buffer->length = bytes_received;
+    buffer->cursor = 0;
+    return getNextChar(buffer);
+}
+
+BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
+    char curr = 0, prev = 0;
+    int  len = 0;
+    while (curr != '^') {
+        curr = getNextChar(buffer);
+        // end of the length
+        if (curr == '\n' && prev == '\r') {
+            break;
+        }
+        // curr is a digit
+        len = len * 10;
+        len += curr - '0';
+        prev = curr;
+    }
+
+    s8 str = (s8) {.len = len, .data = new (arena, u8, len)};
+
+    // TODO memcpy
+    for (int i = 0; i < len; i++) {
+        str.data[i] = getNextChar(buffer);
+    }
+    assert(getNextChar(buffer) == '\r');
+    assert(getNextChar(buffer) == '\n');
+
+    return (BulkString) {.str = str};
+}
+
+RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer) {
+    RespArray array;
+    char      curr = 0, prev = 0;
+    int       len = 0;
+    while (curr != '^') {
+        curr = getNextChar(buffer);
+        // end of the length
+        if (curr == '\n' && prev == '\r') {
+            break;
+        }
+        // curr is a digit
+        len = len * 10;
+        len += curr - '0';
+        prev = curr;
+    }
+    array.elts  = initialize_vec();
+    array.count = len;
+    for (int i = 0; i < len; i++) {
+        Request *element = new (arena, Request, 1);
+        *element         = parse_request(arena, buffer);
+        push_vec(array.elts, element);
+    }
+    return array;
+}
+
 // TODO: split to two functions.
 // 1. parse_resp_array that takes in a char* and parses it as resp array. It returns the RespArray
 // strcuct.
 // 2. read_resp_array_from_socket: that takes a client_fd and reads chunk by chunk and uses the
 // parse_resp_array to parse it. If the response is not completed it reads more and then parses it
+// 3. Use scratch arena for request parsing
 // again until it has full response.
-RespArray *parse_resp_array(Arena *arena, int client_fd) {
-    RespArray *array = new (arena, RespArray);
-    array->parts     = NULL;
-    array->count     = 0;
-    array->error     = 0;
+Request parse_request(Arena *arena, RequestParserBuffer *buffer) {
+    Request request;
+    int     state = 0;
 
-    // Use a reasonable buffer size
-    int   req_size       = 64 * 1024; // 64KB chunks
-    char *buffer         = new (arena, char, req_size);
-    char *request        = new (arena, char, 1024 * 1024); // 1MB total
-    int   total_received = 0;
-    int   bytes_received;
-
-    // Read in chunks until we get a complete request
-    while ((bytes_received = recv(client_fd, buffer, req_size - 1, 0)) > 0) {
-        // Check if we have room
-        if (total_received + bytes_received >= 1024 * 1024) {
-            array->error = 1;
-            return array;
-        }
-
-        // Copy the chunk
-        memcpy(request + total_received, buffer, bytes_received);
-        total_received += bytes_received;
-        request[total_received] = '\0';
-
-        // Check if we have a complete request
-        if (total_received >= 2 && request[total_received - 2] == '\r' &&
-            request[total_received - 1] == '\n') {
-            break;
+    // Skip the initial part until you see something familiar
+    while (state == 0) {
+        char c = getNextChar(buffer);
+        if (c == '*')
+            parse_resp_array(arena, buffer);
+        if (c == '$')
+            parse_bulk_string(arena, buffer);
+        if (c == '^') {
+            request.error = 1;
+            return request;
         }
     }
 
-    if (bytes_received <= 0 && total_received == 0) {
-        array->error = 1;
-        return array;
-    }
-
-    printf("Received request: `%s` size: `%d`\n", request, total_received);
-
-    array->raw = request;
-
-    int cursor = 0;
-
-    // RDB transfer
-    // TODO: rdb transfer is being ignored
-    while (request[0] != '*') {
-        request++;
-    }
-
-    // Parse the array length from the first line
-    if (request[cursor] != '*') {
-        array->error = 1;
-        return array;
-    }
-    cursor++;
-
-    array->count = atoi(&request[cursor]);
-    array->parts = new (arena, char *, array->count);
-
-    int part_index = 0;
-
-    // Skip first line
-    while (cursor < total_received && request[cursor] != '\n')
-        cursor++;
-    cursor++;
-
-    while (cursor < total_received && part_index < array->count) {
-        if (request[cursor] == '$') {
-            cursor++;
-            int part_len_start = cursor;
-
-            // Read length
-            while (cursor < total_received && request[cursor] != '\r')
-                cursor++;
-
-            char part_len_str[32];
-            int  len_section_len = cursor - part_len_start;
-            strncpy(part_len_str, request + part_len_start, len_section_len);
-            part_len_str[len_section_len] = '\0';
-            int part_len                  = atoi(part_len_str);
-
-            // Skip \r\n
-            cursor += 2;
-
-            // Allocate and copy the part
-            array->parts[part_index] = new (arena, char, part_len + 1);
-            strncpy(array->parts[part_index], request + cursor, part_len);
-            array->parts[part_index][part_len] = '\0';
-            part_index++;
-
-            // Skip the part content and \r\n
-            cursor += part_len + 2;
-        } else {
-            cursor++;
-        }
-    }
-
-    return array;
+    return request;
 }
 
 void handle_echo(Context *ctx, Arena *scratch, RespArray *request, int *i) {
     printf("responding to echo\n");
     (*i)++;
     if (*i < request->count) {
-        send_response_bulk_string(ctx->conn_fd, request->parts[*i]);
+        send_response_bulk_string(ctx->conn_fd, request->elts[*i]);
     }
 }
 
 void handle_set(Context *ctx, Arena *scratch, RespArray *request, int *i) {
     printf("responding to set\n");
-    char     *key = request->parts[++(*i)];
-    char     *val = request->parts[++(*i)];
+    char     *key = request->elts[++(*i)];
+    char     *val = request->elts[++(*i)];
     long long ttl = -1;
     if (request->count > *i + 1) {
-        if (strcmp(request->parts[++(*i)], "px") != 0) {
+        if (strcmp(request->elts[++(*i)], "px") != 0) {
             printf("unknown command arguments");
             return;
         }
         long long current_time = get_current_time();
         printf("current time: %lld\n", current_time);
-        ttl = current_time + atoi(request->parts[++(*i)]);
+        ttl = current_time + atoi(request->elts[++(*i)]);
     }
     DEBUG_PRINT(ttl, lld);
     HashMapNode *hNode = hashmap_node_init();
@@ -520,14 +512,14 @@ void handle_set(Context *ctx, Arena *scratch, RespArray *request, int *i) {
 
 void handle_get(Context *ctx, Arena *scratch, RespArray *request, int *i) {
     printf("responding to get\n");
-    char        *key  = request->parts[++(*i)];
+    char        *key  = request->elts[++(*i)];
     HashMapNode *node = hashmap_get(ctx->hashmap, key);
     if (node == NULL) {
         respond_null(ctx->conn_fd);
         return;
     }
     long long current_time = get_current_time();
-    printf("current time: %lld", current_time);
+    printf("current time: %lld\n", current_time);
     if (node->ttl < current_time && node->ttl != -1) {
         printf("item expired ttl: %lld \n", node->ttl);
         respond_null(ctx->conn_fd);
@@ -537,7 +529,7 @@ void handle_get(Context *ctx, Arena *scratch, RespArray *request, int *i) {
 }
 
 void handle_keys(Context *ctx, Arena *scratch, RespArray *request, int *i) {
-    char *pattern = request->parts[++(*i)];
+    char *pattern = request->elts[++(*i)];
     if (strncmp(pattern, "*", 1) != 0) {
         printf("unrecognized pattern");
         exit(1);
@@ -557,11 +549,11 @@ void handle_ping(Context *ctx, Arena *scratch, RespArray *request, int *i) {
 }
 
 void handle_config(Context *ctx, Arena *scratch, RespArray *request, int *i) {
-    if (strcmp(request->parts[++(*i)], "GET") != 0) {
+    if (strcmp(request->elts[++(*i)], "GET") != 0) {
         printf("Unknown config argument\n");
         return;
     }
-    char *arg        = request->parts[++(*i)];
+    char *arg        = request->elts[++(*i)];
     char *config_val = getConfig(ctx->config, arg);
     if (config_val == NULL) {
         fprintf(stderr, "Unknown Config %s\n", arg);
@@ -574,7 +566,7 @@ void handle_config(Context *ctx, Arena *scratch, RespArray *request, int *i) {
 void handle_info(Context *ctx, Arena *scratch, RespArray *request, int *i) {
     fprintf(stderr, "responding to INFO\n");
     (*i)++;
-    if (strcmp(request->parts[*i], "replication")) {
+    if (strcmp(request->elts[*i], "replication")) {
         // no info other than replication supported
         UNREACHABLE();
     }
@@ -604,14 +596,14 @@ typedef struct {
 void handle_replconf(Context *ctx, Arena *scratch, RespArray *request, int *i,
                      ReplicaConfig *replica) {
     (*i)++;
-    if (strcmp(request->parts[*i], "listening-port") == 0) {
+    if (strcmp(request->elts[*i], "listening-port") == 0) {
         (*i)++;
-        int port      = atoi(request->parts[*i]);
+        int port      = atoi(request->elts[*i]);
         replica->port = port;
-    } else if (strcmp(request->parts[*i], "capa") == 0) {
+    } else if (strcmp(request->elts[*i], "capa") == 0) {
         (*i)++;
-        if (strcmp(request->parts[*i], "psync2") != 0) {
-            printf("%s is not supported", request->parts[*i]);
+        if (strcmp(request->elts[*i], "psync2") != 0) {
+            printf("%s is not supported", request->elts[*i]);
             UNREACHABLE();
         }
     }
@@ -620,9 +612,9 @@ void handle_replconf(Context *ctx, Arena *scratch, RespArray *request, int *i,
 
 void handle_psync(Context *ctx, Arena *scratch, RespArray *request, int *i) {
     (*i)++;
-    if (strcmp(request->parts[*i], "?") == 0) {
+    if (strcmp(request->elts[*i], "?") == 0) {
         (*i)++;
-        if (strcmp(request->parts[*i], "-1") == 0) {
+        if (strcmp(request->elts[*i], "-1") == 0) {
             char response[100];
             sprintf(response, "+FULLRESYNC %s 0\r\n", ctx->config->master_replid);
             send_response(ctx->conn_fd, response);
@@ -637,16 +629,26 @@ void *connection_handler(void *arg) {
     int keep_alive = 1;
 
     // If a replica talks in this connection the information will be recorded.
-    ReplicaConfig *replica = (ReplicaConfig *) malloc(sizeof(ReplicaConfig));
+    ReplicaConfig      *replica  = (ReplicaConfig *) malloc(sizeof(ReplicaConfig));
+    int                 req_size = 64 * 1024; // 64KB chunks
+    char               *buf      = new (ctx->thread_allocator, byte, req_size);
+    RequestParserBuffer buffer   = (RequestParserBuffer) {
+          .buffer    = buf,
+          .cursor    = 0,
+          .length    = 0,
+          .capacity  = req_size,
+          .client_fd = client_fd,
+    };
 
     while (keep_alive) {
-        RespArray *request = parse_resp_array(ctx->thread_allocator, client_fd);
-        if (request->error) {
-            break;
+        Request request = parse_request(ctx->thread_allocator, &buffer);
+        if (request.error) {
+            keep_alive = 0;
         }
 
         DEBUG_LOG("parsed request");
         DEBUG_PRINT(request->count, d);
+        DEBUG_PRINT(request->parts[0], s);
 
         for (int arg_index = 0; arg_index < request->count; arg_index++) {
             if (strncmp(request->parts[arg_index], "ECHO", 4) == 0) {

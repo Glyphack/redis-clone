@@ -3,7 +3,7 @@
 
 #include "hashmap.h"
 #include "vec.h"
-#include "common.h"
+#include "str.h"
 
 #define RDB_KEY_EXP_KIND_NO_TTL 0
 #define RDB_KEY_EXP_KIND_S 1
@@ -20,7 +20,7 @@ typedef struct RdbDatabase {
 } RdbDatabase;
 
 typedef struct RdbContent {
-  Mystr *header;
+  s8 header;
   vector *metadata;
   vector *databases;
 } RdbContent;

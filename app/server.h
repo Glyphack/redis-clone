@@ -3,6 +3,7 @@
 
 #include "arena.h"
 #include "hashmap.h"
+#include "str.h"
 #include "vec.h"
 #include <netinet/in.h>
 
@@ -31,17 +32,37 @@ typedef struct {
     int is_connection_to_master;
 } Context;
 
+typedef enum {
+    BULK_STRING,
+    ARRAY,
+} ReqType;
+
 typedef struct {
-    char* raw;
-    char** parts;
+    s8 str;
+} BulkString;
+
+typedef struct {
+    ReqType type;
+    void* val;
+    int error;
+} Request;
+
+typedef struct {
+    vector* elts;
     int count;
     int error;
 } RespArray;
 
+typedef struct {
+    char *buffer;
+    int   cursor;
+    int   length;
+    int   capacity;
+    int   client_fd;
+} RequestParserBuffer;
+
 void* connection_handler(void* arg);
 void send_response_array(int client_fd, char** items, int size);
-RespArray* parse_resp_array(Arena* arena, int client_fd);
 int send_response(int client_fd, const char* response);
-
-
+Request parse_request(Arena *, RequestParserBuffer *);
 #endif

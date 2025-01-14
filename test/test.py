@@ -38,8 +38,7 @@ master_repl_offset:0""".strip()
         "name": "check load RDB",
         "cmd": "./bin --port 9999 --dir . --dbfilename dump.rdb --test-rdb",
         "output": """loaded rdb content:
-header is
-REDIS0011
+header: REDIS0011
 auxiliary fields
 redis-ver
 7.2.6
