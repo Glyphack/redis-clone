@@ -53,10 +53,10 @@ HashMapNode *hashmap_get(HashMap *h, char *key) {
 }
 
 char **hashmap_keys(HashMap *h) {
-    char **array = new (h->arena, char *, h->size);
+    char **array = (char **) malloc(h->size * sizeof(char *));
     for (int i = 0; i < h->size; i++) {
         HashMapNode *node = h->nodes[i];
-        array[i]          = new (h->arena, char, strlen(node->key) + 1);
+        array[i]          = (char *) malloc((strlen(node->key) + 1) * sizeof(char));
         strcpy(array[i], node->key);
     }
     return array;

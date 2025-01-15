@@ -4,6 +4,7 @@
 #include "common.h"
 #include "hashmap.h"
 #include "rdb.h"
+#include "resp.h"
 #include "str.h"
 #include "types.h"
 #include "vec.h"
@@ -307,7 +308,7 @@ int main(int argc, char *argv[]) {
         context->thread_allocator        = thread_allocator;
         context->main_arena              = &arena;
         context->is_connection_to_master = 0;
-        if (pthread_create(&thread_id, NULL, connection_handler, context) < 0) {
+        if (pthread_create(&thread_id, NULL, connection_handler, context) != 0) {
             perror("Could not create thread");
             return 1;
         }
@@ -321,305 +322,31 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-void *send_response_bulk_string(int client_fd, char *msg) {
-    size_t msg_len      = strlen(msg);
-    size_t response_len = msg_len + 32; // Extra space for $, length, \r\n
-    char  *response     = malloc(response_len);
-    if (!response) {
-        fprintf(stderr, "Failed to allocate response buffer\n");
-        return NULL;
-    }
-
-    snprintf(response, response_len, "$%zu\r\n%s\r\n", msg_len, msg);
-    printf("responding with `%s`", response);
-    int sent = send(client_fd, response, strlen(response), 0);
-    if (sent < 0) {
-        fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-    } else {
-        printf("bytes sent %d\n", sent);
-    }
-    free(response);
-    return NULL;
+void handle_echo(Context *ctx, s8 arg) {
+    DEBUG_LOG("responding to echo");
+    send_response_bulk_string(ctx, arg);
 }
 
-void *respond_null(int client_fd) {
-    char response[6];
-    response[5] = '\0';
-    snprintf(response, sizeof(response), "$%d\r\n", -1);
-    printf("responding with `%s`", response);
-    int sent = send(client_fd, response, 5, 0);
-    if (sent < 0) {
-        fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-    } else {
-        printf("bytes sent %d\n", sent);
-    }
-    return NULL;
-}
-
-int send_response(int client_fd, const char *response) {
-    int sent = send(client_fd, response, strlen(response), 0);
-    if (sent < 0) {
-        fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-    } else {
-        printf("bytes sent %d\n", sent);
-    }
-    return sent;
-}
-
-void send_response_array(int client_fd, char **items, int size) {
-    char response[RESPONSE_ITEM_MAX_SIZE * size + size % 10 + 5];
-    sprintf(response, "*%d\r\n", size);
-    for (int i = 0; i < size; i++) {
-        char formatted[RESPONSE_ITEM_MAX_SIZE];
-        snprintf(formatted, RESPONSE_ITEM_MAX_SIZE, "$%d\r\n%s\r\n", (int) strlen(items[i]),
-                 items[i]);
-        strncat(response, formatted, RESPONSE_ITEM_MAX_SIZE);
-    }
-    send_response(client_fd, response);
-}
-
-char getNextChar(RequestParserBuffer *buffer) {
-    if (buffer->cursor < buffer->length) {
-        char c = buffer->buffer[buffer->cursor];
-        buffer->cursor++;
-        return c;
-    }
-    int bytes_received;
-
-    bytes_received = recv(buffer->client_fd, buffer->buffer, buffer->capacity, 0);
-    if (bytes_received <= 0) {
-        // TODO another way
-        return '^';
-    }
-    buffer->length = bytes_received;
-    buffer->cursor = 0;
-    return getNextChar(buffer);
-}
-
-BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
-    char curr = 0, prev = 0;
-    int  len = 0;
-    while (curr != '^') {
-        curr = getNextChar(buffer);
-        // end of the length
-        if (curr == '\n' && prev == '\r') {
-            break;
-        }
-        // curr is a digit
-        len = len * 10;
-        len += curr - '0';
-        prev = curr;
-    }
-
-    s8 str = (s8) {.len = len, .data = new (arena, u8, len)};
-
-    // TODO memcpy
-    for (int i = 0; i < len; i++) {
-        str.data[i] = getNextChar(buffer);
-    }
-    assert(getNextChar(buffer) == '\r');
-    assert(getNextChar(buffer) == '\n');
-
-    return (BulkString) {.str = str};
-}
-
-RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer) {
-    RespArray array;
-    char      curr = 0, prev = 0;
-    int       len = 0;
-    while (curr != '^') {
-        curr = getNextChar(buffer);
-        // end of the length
-        if (curr == '\n' && prev == '\r') {
-            break;
-        }
-        // curr is a digit
-        len = len * 10;
-        len += curr - '0';
-        prev = curr;
-    }
-    array.elts  = initialize_vec();
-    array.count = len;
-    for (int i = 0; i < len; i++) {
-        Request *element = new (arena, Request, 1);
-        *element         = parse_request(arena, buffer);
-        push_vec(array.elts, element);
-    }
-    return array;
-}
-
-// TODO: split to two functions.
-// 1. parse_resp_array that takes in a char* and parses it as resp array. It returns the RespArray
-// strcuct.
-// 2. read_resp_array_from_socket: that takes a client_fd and reads chunk by chunk and uses the
-// parse_resp_array to parse it. If the response is not completed it reads more and then parses it
-// 3. Use scratch arena for request parsing
-// again until it has full response.
-Request parse_request(Arena *arena, RequestParserBuffer *buffer) {
-    Request request;
-    int     state = 0;
-
-    // Skip the initial part until you see something familiar
-    while (state == 0) {
-        char c = getNextChar(buffer);
-        if (c == '*')
-            parse_resp_array(arena, buffer);
-        if (c == '$')
-            parse_bulk_string(arena, buffer);
-        if (c == '^') {
-            request.error = 1;
-            return request;
-        }
-    }
-
-    return request;
-}
-
-void handle_echo(Context *ctx, Arena *scratch, RespArray *request, int *i) {
-    printf("responding to echo\n");
-    (*i)++;
-    if (*i < request->count) {
-        send_response_bulk_string(ctx->conn_fd, request->elts[*i]);
-    }
-}
-
-void handle_set(Context *ctx, Arena *scratch, RespArray *request, int *i) {
-    printf("responding to set\n");
-    char     *key = request->elts[++(*i)];
-    char     *val = request->elts[++(*i)];
-    long long ttl = -1;
-    if (request->count > *i + 1) {
-        if (strcmp(request->elts[++(*i)], "px") != 0) {
-            printf("unknown command arguments");
-            return;
-        }
-        long long current_time = get_current_time();
-        printf("current time: %lld\n", current_time);
-        ttl = current_time + atoi(request->elts[++(*i)]);
-    }
-    DEBUG_PRINT(ttl, lld);
-    HashMapNode *hNode = hashmap_node_init();
-    strcpy(hNode->key, key);
-    strcpy(hNode->val, val);
-    hNode->ttl = ttl;
-    // TODO: add this logic to not respond to all write commands
-    hashmap_insert(ctx->hashmap, hNode);
-    if (ctx->is_connection_to_master) {
-        return;
-    }
-    send_response_bulk_string(ctx->conn_fd, "OK");
-}
-
-void handle_get(Context *ctx, Arena *scratch, RespArray *request, int *i) {
+void handle_get(Context *ctx, s8 key) {
     printf("responding to get\n");
-    char        *key  = request->elts[++(*i)];
-    HashMapNode *node = hashmap_get(ctx->hashmap, key);
+    Arena       *scratch = &(*ctx->thread_allocator);
+    HashMapNode *node    = hashmap_get(ctx->hashmap, s8_to_cstr(scratch, key));
     if (node == NULL) {
         respond_null(ctx->conn_fd);
         return;
     }
-    long long current_time = get_current_time();
-    printf("current time: %lld\n", current_time);
-    if (node->ttl < current_time && node->ttl != -1) {
+    if (node->ttl != -1 && node->ttl < get_current_time()) {
         printf("item expired ttl: %lld \n", node->ttl);
         respond_null(ctx->conn_fd);
         return;
     }
-    send_response_bulk_string(ctx->conn_fd, node->val);
+    send_response_bulk_string(ctx, s8_from_cstr(scratch, node->val));
 }
 
-void handle_keys(Context *ctx, Arena *scratch, RespArray *request, int *i) {
-    char *pattern = request->elts[++(*i)];
-    if (strncmp(pattern, "*", 1) != 0) {
-        printf("unrecognized pattern");
-        exit(1);
-    }
-    printf("responding to keys\n");
-    char **keys = hashmap_keys(ctx->hashmap);
-    if (keys == NULL) {
-        respond_null(ctx->conn_fd);
-        return;
-    }
-    send_response_array(ctx->conn_fd, keys, ctx->hashmap->size);
-}
-
-void handle_ping(Context *ctx, Arena *scratch, RespArray *request, int *i) {
-    printf("responding to ping\n");
+// TODO if msg is not empty reply back
+void handle_ping(Context *ctx, s8 msg) {
+    DEBUG_LOG("responding to ping");
     send_response(ctx->conn_fd, pongMsg);
-}
-
-void handle_config(Context *ctx, Arena *scratch, RespArray *request, int *i) {
-    if (strcmp(request->elts[++(*i)], "GET") != 0) {
-        printf("Unknown config argument\n");
-        return;
-    }
-    char *arg        = request->elts[++(*i)];
-    char *config_val = getConfig(ctx->config, arg);
-    if (config_val == NULL) {
-        fprintf(stderr, "Unknown Config %s\n", arg);
-        return;
-    }
-    char *resps[2] = {arg, config_val};
-    send_response_array(ctx->conn_fd, resps, 2);
-}
-
-void handle_info(Context *ctx, Arena *scratch, RespArray *request, int *i) {
-    fprintf(stderr, "responding to INFO\n");
-    (*i)++;
-    if (strcmp(request->elts[*i], "replication")) {
-        // no info other than replication supported
-        UNREACHABLE();
-    }
-    int total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
-    total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
-    total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
-    total_size += 1;                                      // null terminator
-
-    char *response = new (scratch, byte, total_size);
-    int   offset   = 0;
-
-    offset += sprintf(response + offset, "role:%s\n",
-                      ctx->config->master_info != NULL ? "slave" : "master");
-    offset += sprintf(response + offset, "master_replid:%s\n", ctx->config->master_replid);
-    offset +=
-        sprintf(response + offset, "master_repl_offset:%d\n", ctx->config->master_repl_offset);
-
-    send_response_bulk_string(ctx->conn_fd, response);
-}
-
-typedef struct {
-    int port;
-    int handskahe_done;
-    int conn_fd;
-} ReplicaConfig;
-
-void handle_replconf(Context *ctx, Arena *scratch, RespArray *request, int *i,
-                     ReplicaConfig *replica) {
-    (*i)++;
-    if (strcmp(request->elts[*i], "listening-port") == 0) {
-        (*i)++;
-        int port      = atoi(request->elts[*i]);
-        replica->port = port;
-    } else if (strcmp(request->elts[*i], "capa") == 0) {
-        (*i)++;
-        if (strcmp(request->elts[*i], "psync2") != 0) {
-            printf("%s is not supported", request->elts[*i]);
-            UNREACHABLE();
-        }
-    }
-    send_response(ctx->conn_fd, okMsg);
-}
-
-void handle_psync(Context *ctx, Arena *scratch, RespArray *request, int *i) {
-    (*i)++;
-    if (strcmp(request->elts[*i], "?") == 0) {
-        (*i)++;
-        if (strcmp(request->elts[*i], "-1") == 0) {
-            char response[100];
-            sprintf(response, "+FULLRESYNC %s 0\r\n", ctx->config->master_replid);
-            send_response(ctx->conn_fd, response);
-        }
-    }
 }
 
 void *connection_handler(void *arg) {
@@ -629,7 +356,8 @@ void *connection_handler(void *arg) {
     int keep_alive = 1;
 
     // If a replica talks in this connection the information will be recorded.
-    ReplicaConfig      *replica  = (ReplicaConfig *) malloc(sizeof(ReplicaConfig));
+    ReplicaConfig *replica = (ReplicaConfig *) malloc(sizeof(ReplicaConfig));
+
     int                 req_size = 64 * 1024; // 64KB chunks
     char               *buf      = new (ctx->thread_allocator, byte, req_size);
     RequestParserBuffer buffer   = (RequestParserBuffer) {
@@ -642,51 +370,219 @@ void *connection_handler(void *arg) {
 
     while (keep_alive) {
         Request request = parse_request(ctx->thread_allocator, &buffer);
+        DEBUG_LOG("parsed request");
+        if (request.empty) {
+            break;
+        }
         if (request.error) {
+            printf("Request invalid\n");
             keep_alive = 0;
+            continue;
         }
 
-        DEBUG_LOG("parsed request");
-        DEBUG_PRINT(request->count, d);
-        DEBUG_PRINT(request->parts[0], s);
+        assert(request.type == ARRAY);
+        RespArray *resp_array = (RespArray *) request.val;
+        if (resp_array->count == 0) {
+            printf("Request invalid\n");
+            keep_alive = 0;
+        }
+        Request *command_val = resp_array->elts[0];
+        assert(command_val->type == BULK_STRING);
+        BulkString *command = (BulkString *) command_val->val;
+        s8print(command->str);
 
-        for (int arg_index = 0; arg_index < request->count; arg_index++) {
-            if (strncmp(request->parts[arg_index], "ECHO", 4) == 0) {
-                handle_echo(ctx, ctx->thread_allocator, request, &arg_index);
-            } else if (strncmp(request->parts[arg_index], "SET", 3) == 0) {
-                handle_set(ctx, ctx->thread_allocator, request, &arg_index);
-                // TODO: extract this to a function and perform on all write operations
-                // Do not propagate from replicas
-                if (ctx->replicas != NULL) {
-                    for (int i = 0; i < ctx->replicas->total; i++) {
-                        ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
-                        if (replica_to_send->handskahe_done == 1) {
-                            printf("propagating command to replica %d\n", replica_to_send->port);
-                            send_response(replica_to_send->conn_fd, request->raw);
-                        }
+        if (s8equals(command->str, S("PING")) == true) {
+            s8 arg = S("");
+            if (resp_array->count == 2) {
+                Request *arg_val = resp_array->elts[1];
+                assert(arg_val->type == BULK_STRING);
+                arg = ((BulkString *) arg_val->val)->str;
+            }
+            handle_ping(ctx, arg);
+        } else if (s8equals(command->str, S("ECHO")) == true) {
+            assert(resp_array->count == 2);
+            Request *command_val = resp_array->elts[1];
+            assert(command_val->type == BULK_STRING);
+            BulkString *command = (BulkString *) command_val->val;
+            handle_echo(ctx, command->str);
+        } else if (s8equals(command->str, S("GET")) == true) {
+            assert(resp_array->count == 2);
+            Request *command_val = resp_array->elts[1];
+            assert(command_val->type == BULK_STRING);
+            BulkString *key = (BulkString *) command_val->val;
+            handle_get(ctx, key->str);
+        } else if (s8equals(command->str, S("SET")) == true) {
+            //         // TODO: extract this to a function and perform on all write operations
+            //         // Do not propagate from replicas
+            //         if (ctx->replicas != NULL) {
+            //             for (int i = 0; i < ctx->replicas->total; i++) {
+            //                 ReplicaConfig *replica_to_send = (ReplicaConfig *)
+            //                 ctx->replicas->items[i]; if (replica_to_send->handskahe_done == 1) {
+            //                     printf("propagating command to replica %d\n",
+            //                     replica_to_send->port); send_response(replica_to_send->conn_fd,
+            //                     request->raw);
+            //                 }
+            //             }
+            //         }
+            assert(resp_array->count >= 3);
+            Request *key_val = resp_array->elts[1];
+            Request *val_val = resp_array->elts[2];
+            assert(key_val->type == BULK_STRING);
+            assert(val_val->type == BULK_STRING);
+            BulkString *key = (BulkString *) key_val->val;
+            BulkString *val = (BulkString *) val_val->val;
+
+            long long ttl = -1;
+            if (resp_array->count > 3) {
+                Request *px_val = resp_array->elts[3];
+                assert(px_val->type == BULK_STRING);
+                BulkString *px = (BulkString *) px_val->val;
+                if (!s8equals(px->str, S("px"))) {
+                    printf("unknown command arguments");
+                    keep_alive = 0;
+                    continue;
+                }
+                Request *ttl_val = resp_array->elts[4];
+                assert(ttl_val->type == BULK_STRING);
+                BulkString *ttl_str      = (BulkString *) ttl_val->val;
+                Arena      *scratch      = &(*ctx->thread_allocator);
+                long long   current_time = get_current_time();
+                ttl                      = current_time + atoi(s8_to_cstr(scratch, ttl_str->str));
+            }
+
+            HashMapNode *hNode = hashmap_node_init();
+            strcpy(hNode->key, s8_to_cstr(ctx->thread_allocator, key->str));
+            strcpy(hNode->val, s8_to_cstr(ctx->thread_allocator, val->str));
+            hNode->ttl = ttl;
+            hashmap_insert(ctx->hashmap, hNode);
+
+            if (!ctx->is_connection_to_master) {
+                send_response_bulk_string(ctx, S("OK"));
+            }
+
+            // Propagate to replicas
+            if (ctx->replicas != NULL) {
+                for (int i = 0; i < ctx->replicas->total; i++) {
+                    ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
+                    if (replica_to_send->handskahe_done == 1) {
+                        printf("propagating command to replica %d\n", replica_to_send->port);
+                        // TODO: Need to reconstruct the raw command from the parsed request
+                        // send_response(replica_to_send->conn_fd, request->raw);
                     }
                 }
+            }
+        } else if (s8equals(command->str, S("KEYS")) == true) {
+            assert(resp_array->count == 2);
+            Request *pattern_val = resp_array->elts[1];
+            assert(pattern_val->type == BULK_STRING);
+            BulkString *pattern = (BulkString *) pattern_val->val;
 
-            } else if (strncmp(request->parts[arg_index], "GET", 3) == 0) {
-                handle_get(ctx, ctx->thread_allocator, request, &arg_index);
-            } else if (strncmp(request->parts[arg_index], "KEYS", 4) == 0) {
-                handle_keys(ctx, ctx->thread_allocator, request, &arg_index);
-            } else if (strncmp(request->parts[arg_index], "PING", 4) == 0) {
-                handle_ping(ctx, ctx->thread_allocator, request, &arg_index);
-            } else if (strcmp(request->parts[arg_index], "CONFIG") == 0) {
-                handle_config(ctx, ctx->thread_allocator, request, &arg_index);
-            } else if (strcmp(request->parts[arg_index], "INFO") == 0) {
-                handle_info(ctx, ctx->thread_allocator, request, &arg_index);
-            } else if (strcmp(request->parts[arg_index], "REPLCONF") == 0) {
-                handle_replconf(ctx, ctx->thread_allocator, request, &arg_index, replica);
-            } else if (strcmp(request->parts[arg_index], "PSYNC") == 0) {
-                handle_psync(ctx, ctx->thread_allocator, request, &arg_index);
+            if (!s8equals(pattern->str, S("*"))) {
+                printf("unrecognized pattern");
+                keep_alive = 0;
+                continue;
+            }
+
+            char **keys = hashmap_keys(ctx->hashmap);
+            if (keys == NULL) {
+                respond_null(ctx->conn_fd);
+                continue;
+            }
+            send_response_array(ctx->conn_fd, keys, ctx->hashmap->size);
+        } else if (s8equals(command->str, S("CONFIG")) == true) {
+            assert(resp_array->count == 3);
+            Request *get_val = resp_array->elts[1];
+            assert(get_val->type == BULK_STRING);
+            BulkString *get = (BulkString *) get_val->val;
+
+            if (!s8equals(get->str, S("GET"))) {
+                printf("Unknown config argument\n");
+                keep_alive = 0;
+                continue;
+            }
+
+            Request *arg_val = resp_array->elts[2];
+            assert(arg_val->type == BULK_STRING);
+            BulkString *arg = (BulkString *) arg_val->val;
+
+            char *config_val = getConfig(ctx->config, s8_to_cstr(ctx->thread_allocator, arg->str));
+            if (config_val == NULL) {
+                fprintf(stderr, "Unknown Config %s\n", s8_to_cstr(ctx->thread_allocator, arg->str));
+                continue;
+            }
+
+            char *resps[2] = {s8_to_cstr(ctx->thread_allocator, arg->str), config_val};
+            send_response_array(ctx->conn_fd, resps, 2);
+        } else if (s8equals(command->str, S("INFO")) == true) {
+            assert(resp_array->count == 2);
+            Request *section_val = resp_array->elts[1];
+            assert(section_val->type == BULK_STRING);
+            BulkString *section = (BulkString *) section_val->val;
+
+            if (!s8equals(section->str, S("replication"))) {
+                // no info other than replication supported
+                UNREACHABLE();
+            }
+
+            Arena *scratch    = &(*ctx->thread_allocator);
+            int    total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
+            total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
+            total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
+            total_size += 1;                                      // null terminator
+
+            char *response = new (scratch, byte, total_size);
+            int   offset   = 0;
+
+            offset += sprintf(response + offset, "role:%s\n",
+                              ctx->config->master_info != NULL ? "slave" : "master");
+            offset += sprintf(response + offset, "master_replid:%s\n", ctx->config->master_replid);
+            offset += sprintf(response + offset, "master_repl_offset:%d\n",
+                              ctx->config->master_repl_offset);
+
+            send_response_bulk_string(ctx, s8_from_cstr(scratch, response));
+        } else if (s8equals(command->str, S("REPLCONF")) == true) {
+            assert(resp_array->count == 3);
+            Request *arg_val = resp_array->elts[1];
+            assert(arg_val->type == BULK_STRING);
+            BulkString *arg = (BulkString *) arg_val->val;
+
+            if (s8equals(arg->str, S("listening-port"))) {
+                Request *port_val = resp_array->elts[2];
+                assert(port_val->type == BULK_STRING);
+                BulkString *port_str = (BulkString *) port_val->val;
+                replica->port        = atoi(s8_to_cstr(ctx->thread_allocator, port_str->str));
+            } else if (s8equals(arg->str, S("capa"))) {
+                Request *capa_val = resp_array->elts[2];
+                assert(capa_val->type == BULK_STRING);
+                BulkString *capa = (BulkString *) capa_val->val;
+                if (!s8equals(capa->str, S("psync2"))) {
+                    printf("%s is not supported", s8_to_cstr(ctx->thread_allocator, capa->str));
+                    UNREACHABLE();
+                }
+            }
+            send_response(ctx->conn_fd, okMsg);
+        } else if (s8equals(command->str, S("PSYNC")) == true) {
+            assert(resp_array->count == 3);
+            Request *arg1_val = resp_array->elts[1];
+            Request *arg2_val = resp_array->elts[2];
+            assert(arg1_val->type == BULK_STRING);
+            assert(arg2_val->type == BULK_STRING);
+            BulkString *arg1 = (BulkString *) arg1_val->val;
+            BulkString *arg2 = (BulkString *) arg2_val->val;
+
+            if (s8equals(arg1->str, S("?")) && s8equals(arg2->str, S("-1"))) {
+                char response[100];
+                sprintf(response, "+FULLRESYNC %s 0\r\n", ctx->config->master_replid);
+                send_response(ctx->conn_fd, response);
+
                 printf("handshake with replica at %d done.\n", replica->port);
                 replica->handskahe_done = 1;
                 replica->conn_fd        = ctx->conn_fd;
                 push_vec(ctx->replicas, replica);
+
                 // transfer rdb
-                char *rdbContent = new (ctx->thread_allocator, byte, 1024);
+                Arena *scratch    = &(*ctx->thread_allocator);
+                char  *rdbContent = new (scratch, byte, 1024);
                 char *hexString = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469"
                                   "732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0"
                                   "c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
@@ -694,17 +590,18 @@ void *connection_handler(void *arg) {
                 for (size_t i = 0; i < len; i += 2) {
                     sscanf(hexString + i, "%2hhx", &rdbContent[i / 2]);
                 }
-                char *result = new (ctx->thread_allocator, byte, 1024);
+                char *result = new (scratch, byte, 1024);
                 snprintf(result, 1024, "$%lu\r\n%s", strlen(rdbContent), rdbContent);
                 send_response(ctx->conn_fd, result);
                 recv(ctx->conn_fd, 0, 0, 0);
-            } else {
-                printf("Unknown command %s\n", request->parts[arg_index]);
-                keep_alive = 0;
             }
+        } else {
+            printf("Unknown command\n");
+            keep_alive = 0;
         }
     }
 
+    printf("quitting thread_id %lu\n", (unsigned long) pthread_self());
     droparena(ctx->thread_allocator);
     free(ctx);
     return NULL;

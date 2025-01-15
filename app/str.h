@@ -4,7 +4,7 @@
 #include "types.h"
 #include "arena.h"
 
-#define S(s) (s8){(u8 *)s, lengthof(s)}
+#define S(s) (s8){.data=(u8 *)s, .len=lengthof(s)}
 typedef struct {
     u8  *data;
     size len;
