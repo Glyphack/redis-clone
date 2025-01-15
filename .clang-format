@@ -1,8 +1,8 @@
-Language: C
+Language: Cpp
 BasedOnStyle: LLVM
 IndentWidth: 4
 UseTab: Never
-BreakBeforeBraces: Linux
+BreakBeforeBraces: Attach
 AllowShortIfStatementsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: None
 IndentCaseLabels: false

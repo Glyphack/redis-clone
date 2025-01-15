@@ -3,6 +3,7 @@
 
 #include "arena.h"
 #include "hashmap.h"
+#include "vec.h"
 #include <netinet/in.h>
 
 #define RESPONSE_ITEM_MAX_SIZE 1024
@@ -26,29 +27,18 @@ typedef struct {
     Config* config;
     Arena* thread_allocator;
     Arena* main_arena;
+    vector* replicas;
+    int is_connection_to_master;
 } Context;
 
+
 typedef struct {
-    char** parts;
-    int count;
-    int error;
-} RespArray;
+    int port;
+    int handskahe_done;
+    int conn_fd;
+} ReplicaConfig;
 
 void* connection_handler(void* arg);
 void send_response_array(int client_fd, char** items, int size);
-RespArray* parse_resp_array(Arena* arena, int client_fd);
 int send_response(int client_fd, const char* response);
-
-
-// Add these function prototypes at the top of the file
-void handle_echo(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_set(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_get(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_keys(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_ping(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_config(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_info(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_replconf(Context *ctx, Arena *scratch, RespArray *request, int *i);
-void handle_psync(Context *ctx, Arena *scratch, RespArray *request, int *i);
-
 #endif

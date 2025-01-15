@@ -1,0 +1,17 @@
+$3\r\nabc\r\n*1\r\n$1\r\ns\r\n\r\n
+
+$3\r\nabc\r\n
+*1\r\n$1\r\ns\r\n\r\n
+
+=df-vsdlkj;l_Fd$3\r\nabc\r\n*1\r\n$1\r\ns\r\n\r\n
+skip =df-vsdlkj;l_Fd
+
+$3\r\nabc\r\n*1\r\n$1\r\
+recv 
+ns\r\n\r\n
+
+*1\r\n$1\r\ns\r\n\r\n*1\r\n$1\r\ns\r\n\r\n
+
+
+*12/r/n
+     

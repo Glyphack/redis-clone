@@ -4,13 +4,11 @@ CFLAGS = -std=c23 -Wall -Wextra -O2
 OUTPUT ?= bin
 
 build: app/*.c app/*.h
-	@$(CC) $(CFLAGS) app/*.c -o $(OUTPUT)
-
-run:
-	./your_program.sh $(ARGS)
-	rm /tmp/codecrafters-build-redis-c
+	cmake -B build -D CMAKE_BUILD_TYPE=Debug -S .
+	cmake --build ./build
+	cp ./build/redis $(OUTPUT)
 
 test: 
 	python test/test.py
 
-.PHONY: test run
+.PHONY: test run build

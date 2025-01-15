@@ -1,8 +1,8 @@
-#ifndef ARENA_H
-#define ARENA_H
+#ifndef USERS_LIGHT_PROGRAMMING_REDIS_CLONE_APP_ARENA_H
+#define USERS_LIGHT_PROGRAMMING_REDIS_CLONE_APP_ARENA_H
 #include "types.h"
 
-#define mysizeof(x)    (size)sizeof(x)
+#define mysizeof(x)    sizeof(x)
 #define countof(a)   (mysizeof(a) / mysizeof(*(a)))
 #define lengthof(s)  (countof(s) - 1)
 #define strlength(s) (strlen(s) + 1)
