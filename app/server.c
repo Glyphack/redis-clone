@@ -123,7 +123,6 @@ int handshake(Config *config) {
     nbytes = recv(master_fd, tmp_str, sizeof tmp_str, 0);
     if (nbytes <= 0)
         exit(1);
-    printf("%s", tmp_str);
     // TODO: strtok unsafe do not use it
     char *parts = strtok(tmp_str, " ");
     assert(strcmp(parts, "+FULLRESYNC") == 0);

@@ -178,7 +178,7 @@ void *send_response_bulk_string(Context *ctx, s8 str) {
     snprintf(response, response_len, "$%zu\r\n%.*s\r\n", str.len, (int) str.len, str.data);
     response[response_len - 1] = '\0';
     printf("responding with `%s`", response);
-    int sent = send(ctx->conn_fd, response, response_len, 0);
+    int sent = send(ctx->conn_fd, response, response_len - 1, 0);
     if (sent < 0) {
         fprintf(stderr, "Could not send response: %s\n", strerror(errno));
     } else {
