@@ -168,14 +168,15 @@ Request parse_request(Arena *arena, RequestParserBuffer *buffer) {
 void *send_response_bulk_string(Context *ctx, s8 str) {
     // 1 (for '$') + number of digits in str.len + 2 (\r\n) + str.len + 2 (\r\n) + 1 (null
     // terminator)
-    size_t num_len  = 1;
-    size_t len_copy = str.len;
+    int num_len  = 1;
+    int len_copy = (int) str.len;
     while (len_copy /= 10)
         num_len++;
-    size_t response_len = 1 + num_len + 2 + str.len + 2;
-    char  *response     = new (&(*ctx->thread_allocator), char, response_len);
+    int   response_len = 1 + num_len + 2 + (int) str.len + 2 + 1;
+    char *response     = new (&(*ctx->thread_allocator), char, response_len);
 
     snprintf(response, response_len, "$%zu\r\n%.*s\r\n", str.len, (int) str.len, str.data);
+    response[response_len - 1] = '\0';
     printf("responding with `%s`", response);
     int sent = send(ctx->conn_fd, response, response_len, 0);
     if (sent < 0) {
