@@ -126,8 +126,7 @@ int handshake(Config *config) {
     // TODO: strtok unsafe do not use it
     char *parts = strtok(tmp_str, " ");
     assert(strcmp(parts, "+FULLRESYNC") == 0);
-    parts = strtok(NULL, " ");
-    DEBUG_PRINT(parts, s);
+    parts             = strtok(NULL, " ");
     parts             = strtok(NULL, " ");
     int   repl_offset = 0;
     char *curr_pos    = parts;
@@ -141,7 +140,6 @@ int handshake(Config *config) {
             }
         }
     }
-    DEBUG_PRINT(repl_offset, d);
 
     return master_fd;
 }
@@ -280,7 +278,7 @@ int main(int argc, char *argv[]) {
         context->thread_allocator        = thread_allocator;
         context->main_arena              = &arena;
         context->is_connection_to_master = 1;
-        if (pthread_create(&replication_thread_id, NULL, connection_handler, context) < 0) {
+        if (pthread_create(&replication_thread_id, NULL, connection_handler, context) != 0) {
             perror("Could not create thread");
             return 1;
         }
@@ -379,6 +377,12 @@ void *connection_handler(void *arg) {
             continue;
         }
 
+        // TODO: handle rdb file transfer
+        // for now ignore RDB
+        if (request.type == BULK_STRING) {
+            continue;
+        }
+
         assert(request.type == ARRAY);
         RespArray *resp_array = (RespArray *) request.val;
         if (resp_array->count == 0) {
@@ -411,18 +415,20 @@ void *connection_handler(void *arg) {
             BulkString *key = (BulkString *) command_val->val;
             handle_get(ctx, key->str);
         } else if (s8equals(command->str, S("SET")) == true) {
-            //         // TODO: extract this to a function and perform on all write operations
-            //         // Do not propagate from replicas
-            //         if (ctx->replicas != NULL) {
-            //             for (int i = 0; i < ctx->replicas->total; i++) {
-            //                 ReplicaConfig *replica_to_send = (ReplicaConfig *)
-            //                 ctx->replicas->items[i]; if (replica_to_send->handskahe_done == 1) {
-            //                     printf("propagating command to replica %d\n",
-            //                     replica_to_send->port); send_response(replica_to_send->conn_fd,
-            //                     request->raw);
-            //                 }
-            //             }
-            //         }
+            // TODO: extract this to a function and perform on all write operations
+            // Do not propagate from replicas
+            if (ctx->replicas != NULL) {
+                for (int i = 0; i < ctx->replicas->total; i++) {
+                    ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
+                    if (replica_to_send->handskahe_done == 1) {
+                        printf("propagating command to replica %d\n", replica_to_send->port);
+                        // TODO: Do not use buf directly instead the buffer should keep the whole
+                        // request to send it to the replica. The buf might be overwritten by the
+                        // next request.
+                        send_response(replica_to_send->conn_fd, buf);
+                    }
+                }
+            }
             assert(resp_array->count >= 3);
             Request *key_val = resp_array->elts[1];
             Request *val_val = resp_array->elts[2];
@@ -457,18 +463,6 @@ void *connection_handler(void *arg) {
 
             if (!ctx->is_connection_to_master) {
                 send_response_bulk_string(ctx, S("OK"));
-            }
-
-            // Propagate to replicas
-            if (ctx->replicas != NULL) {
-                for (int i = 0; i < ctx->replicas->total; i++) {
-                    ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
-                    if (replica_to_send->handskahe_done == 1) {
-                        printf("propagating command to replica %d\n", replica_to_send->port);
-                        // TODO: Need to reconstruct the raw command from the parsed request
-                        // send_response(replica_to_send->conn_fd, request->raw);
-                    }
-                }
             }
         } else if (s8equals(command->str, S("KEYS")) == true) {
             assert(resp_array->count == 2);

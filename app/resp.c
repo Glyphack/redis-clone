@@ -4,6 +4,7 @@
 #include "str.h"
 #include <assert.h>
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -14,7 +15,14 @@ char getCurrChar(RequestParserBuffer *buffer) {
     return '\0';
 }
 
-char getNextChar(RequestParserBuffer *buffer) {
+char rewindChar(RequestParserBuffer *buffer) {
+    if (buffer->cursor > 0) {
+        buffer->cursor--;
+    }
+    return buffer->buffer[buffer->cursor];
+}
+
+u8 getNextChar(RequestParserBuffer *buffer) {
     if (buffer->cursor < buffer->length) {
         char c = buffer->buffer[buffer->cursor];
         buffer->cursor++;
@@ -28,6 +36,8 @@ char getNextChar(RequestParserBuffer *buffer) {
         DEBUG_LOG("read everything from client");
         return '\0';
     }
+
+    printf("received request: %.*s\n", (int) bytes_received, buffer->buffer);
     if (bytes_received < 0) {
         UNREACHABLE();
     }
@@ -67,10 +77,13 @@ BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
     for (int i = 0; i < len; i++) {
         str.data[i] = getNextChar(buffer);
     }
-    assert(getNextChar(buffer) == '\r');
-    assert(getNextChar(buffer) == '\n');
+    if (getNextChar(buffer) == '\r') {
+        assert(getNextChar(buffer) == '\n');
+    } else {
+        // TODO: RDB files don't have this
+        rewindChar(buffer);
+    }
 
-    DEBUG_LOG("parsed bulk string");
     return (BulkString) {.str = str};
 }
 
