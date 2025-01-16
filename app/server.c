@@ -539,6 +539,7 @@ void *connection_handler(void *arg) {
                 assert(port_val->type == BULK_STRING);
                 BulkString *port_str = (BulkString *) port_val->val;
                 replica->port        = atoi(s8_to_cstr(ctx->thread_allocator, port_str->str));
+                send_response(ctx->conn_fd, okMsg);
             } else if (s8equals(arg->str, S("capa"))) {
                 Request *capa_val = resp_array->elts[2];
                 assert(capa_val->type == BULK_STRING);
@@ -547,6 +548,7 @@ void *connection_handler(void *arg) {
                     printf("%s is not supported", s8_to_cstr(ctx->thread_allocator, capa->str));
                     UNREACHABLE();
                 }
+                send_response(ctx->conn_fd, okMsg);
             } else if (s8equals(arg->str, S("GETACK"))) {
                 // ["replconf", "getack", "*"]
                 assert(ctx->is_connection_to_master);
@@ -559,8 +561,9 @@ void *connection_handler(void *arg) {
                 snprintf(offset_str, 10, "%d", offset);
                 char *items[3] = {"REPLCONF", "ACK", offset_str};
                 send_response_array(ctx->conn_fd, items, 3);
+            } else {
+                UNREACHABLE();
             }
-            send_response(ctx->conn_fd, okMsg);
         } else if (s8equals(command->str, S("PSYNC")) == true) {
             assert(resp_array->count == 3);
             Request *arg1_val = resp_array->elts[1];
