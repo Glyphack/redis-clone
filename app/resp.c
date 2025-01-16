@@ -68,15 +68,25 @@ int read_len(RequestParserBuffer *buffer) {
     return len;
 }
 
+int min(int a, int b) {
+    return a < b ? a : b;
+}
+
 BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
     DEBUG_LOG("parse bulk string");
     int len = read_len(buffer);
     s8  str = (s8) {.len = len, .data = new (arena, u8, len)};
 
-    // TODO memcpy
-    for (int i = 0; i < len; i++) {
-        str.data[i] = getNextChar(buffer);
+    int len_to_copy = min(buffer->length - buffer->cursor, len);
+    memcpy(str.data, buffer->buffer + buffer->cursor, len_to_copy);
+    buffer->cursor += len_to_copy;
+    len_to_copy = len - len_to_copy;
+    if (len_to_copy > 0) {
+        for (int i = 0; i < len_to_copy; i++) {
+            str.data[i] = getNextChar(buffer);
+        }
     }
+
     if (getNextChar(buffer) == '\r') {
         assert(getNextChar(buffer) == '\n');
     } else {
