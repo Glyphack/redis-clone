@@ -355,6 +355,7 @@ void *connection_handler(void *arg) {
         buffer.total_read = 0;
         Request request   = parse_request(ctx->thread_allocator, &buffer);
         DEBUG_LOG("parsed request");
+        DEBUG_PRINT(buffer.total_read, d);
         if (request.empty) {
             break;
         }
@@ -396,7 +397,8 @@ void *connection_handler(void *arg) {
                 assert(arg_val->type == BULK_STRING);
                 arg = ((BulkString *) arg_val->val)->str;
             }
-            handle_ping(ctx, arg);
+            if (!ctx->is_connection_to_master)
+                handle_ping(ctx, arg);
         } else if (s8equals(command->str, S("ECHO")) == true) {
             assert(resp_array->count == 2);
             Request *command_val = resp_array->elts[1];
@@ -553,6 +555,7 @@ void *connection_handler(void *arg) {
                 // ["replconf", "getack", "*"]
                 assert(ctx->is_connection_to_master);
                 DEBUG_LOG("responding to replconf get ack");
+                DEBUG_PRINT(offset, d);
                 assert(resp_array->count == 3);
                 assert(resp_array->elts[2]->type == BULK_STRING);
                 s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
@@ -605,6 +608,7 @@ void *connection_handler(void *arg) {
         // TODO: if the command could not be processed then do not add to the offset
         if (ctx->is_connection_to_master) {
             offset += buffer.total_read;
+            fprintf(stderr, "DEBUGPRINT[19]: server.c:608: offset=%d\n", offset);
         }
     }
 

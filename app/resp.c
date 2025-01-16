@@ -75,7 +75,6 @@ int min(int a, int b) {
 }
 
 BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
-    DEBUG_LOG("parse bulk string");
     int len = read_len(buffer);
     s8  str = (s8) {.len = len, .data = new (arena, u8, len)};
 
@@ -131,7 +130,6 @@ SimpleString parse_simple_string(Arena *arena, RequestParserBuffer *buffer) {
 }
 
 RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer) {
-    DEBUG_LOG("parsing resp array");
     RespArray array = {0};
     int       len   = read_len(buffer);
     array.elts      = new (arena, Request *, len);
