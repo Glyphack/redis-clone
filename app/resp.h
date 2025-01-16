@@ -2,7 +2,6 @@
 #define RESP_H
 #include "server.h"
 #include "str.h"
-#include "vec.h"
 
 
 // Response size constant
@@ -41,12 +40,12 @@ typedef struct {
 
 typedef struct {
     char *buffer;
-    int   cursor;
-    int   length;
+    long   cursor;
+    long   length;
     int   capacity;
     int   client_fd;
     // total bytes read until the command is processed
-    int total_read;
+    long total_read;
 } RequestParserBuffer;
 
 BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer);
@@ -61,7 +60,7 @@ Request parse_request(Arena *arena, RequestParserBuffer *buffer);
 // Response functions
 void *send_response_bulk_string(Context *ctx, s8 str);
 void *respond_null(int client_fd);
-int send_response(int client_fd, const char *response);
+long send_response(int client_fd, const char *response);
 void send_response_array(int client_fd, char **items, int size);
 
 #endif

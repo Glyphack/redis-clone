@@ -30,7 +30,7 @@ u8 getNextChar(RequestParserBuffer *buffer) {
         buffer->total_read++;
         return c;
     }
-    int bytes_received;
+    long bytes_received;
 
     bytes_received = recv(buffer->client_fd, buffer->buffer, buffer->capacity, 0);
     if (bytes_received == 0) {
@@ -70,17 +70,18 @@ int read_len(RequestParserBuffer *buffer) {
     return len;
 }
 
-int min(int a, int b) {
+long min(long a, long b) {
     return a < b ? a : b;
 }
 
 BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
-    int len = read_len(buffer);
-    s8  str = (s8) {.len = len, .data = new (arena, u8, len)};
+    long len = read_len(buffer);
+    s8   str = (s8) {.len = len, .data = new (arena, u8, len)};
 
-    int len_to_copy = min(buffer->length - buffer->cursor, len);
+    long len_to_copy = min(buffer->length - buffer->cursor, len);
     memcpy(str.data, buffer->buffer + buffer->cursor, len_to_copy);
     buffer->cursor += len_to_copy;
+    buffer->total_read += len_to_copy;
     len_to_copy = len - len_to_copy;
     if (len_to_copy > 0) {
         for (int i = 0; i < len_to_copy; i++) {
@@ -151,7 +152,6 @@ Request parse_request(Arena *arena, RequestParserBuffer *buffer) {
         return request;
     }
 
-    // *1\r\n$4\r\nPING\r\n
     // Skip the initial part until you see something familiar
     while (c != '\0') {
         if (c == '*') {
@@ -202,11 +202,10 @@ void *send_response_bulk_string(Context *ctx, s8 str) {
     snprintf(response, response_len, "$%zu\r\n%.*s\r\n", str.len, (int) str.len, str.data);
     response[response_len - 1] = '\0';
     printf("responding with `%s`", response);
-    int sent = send(ctx->conn_fd, response, response_len - 1, 0);
+    long sent = send(ctx->conn_fd, response, response_len - 1, 0);
     if (sent < 0) {
         fprintf(stderr, "Could not send response: %s\n", strerror(errno));
     } else {
-        printf("bytes sent %d\n", sent);
     }
     return NULL;
 }
@@ -216,19 +215,18 @@ void *respond_null(int client_fd) {
     response[5] = '\0';
     snprintf(response, sizeof(response), "$%d\r\n", -1);
     printf("responding with `%s`", response);
-    int sent = send(client_fd, response, 5, 0);
+    long sent = send(client_fd, response, 5, 0);
     if (sent < 0) {
         fprintf(stderr, "Could not send response: %s\n", strerror(errno));
     } else {
-        printf("bytes sent %d\n", sent);
     }
     return NULL;
 }
 
-int send_response(int client_fd, const char *response) {
+long send_response(int client_fd, const char *response) {
     // DEBUG_PRINT(response, s);
     // DEBUG_PRINT(strlen(response), lu);
-    int sent = send(client_fd, response, strlen(response), 0);
+    long sent = send(client_fd, response, strlen(response), 0);
     if (sent < 0) {
         fprintf(stderr, "Could not send response: %s\n", strerror(errno));
     } else {
