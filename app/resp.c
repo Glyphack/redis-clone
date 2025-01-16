@@ -225,11 +225,12 @@ void *respond_null(int client_fd) {
 }
 
 int send_response(int client_fd, const char *response) {
+    DEBUG_PRINT(response, s);
+    DEBUG_PRINT(strlen(response), lu);
     int sent = send(client_fd, response, strlen(response), 0);
     if (sent < 0) {
         fprintf(stderr, "Could not send response: %s\n", strerror(errno));
     } else {
-        printf("bytes sent %d\n", sent);
     }
     return sent;
 }

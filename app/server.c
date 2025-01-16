@@ -373,7 +373,6 @@ void *connection_handler(void *arg) {
         }
         if (request.error) {
             printf("Request invalid\n");
-            keep_alive = 0;
             continue;
         }
 
@@ -383,7 +382,10 @@ void *connection_handler(void *arg) {
             continue;
         }
 
-        assert(request.type == ARRAY);
+        if (request.type != ARRAY) {
+            printf("only supporting array requests\n");
+            continue;
+        }
         RespArray *resp_array = (RespArray *) request.val;
         if (resp_array->count == 0) {
             printf("Request invalid\n");
@@ -552,6 +554,16 @@ void *connection_handler(void *arg) {
                     printf("%s is not supported", s8_to_cstr(ctx->thread_allocator, capa->str));
                     UNREACHABLE();
                 }
+            } else if (s8equals(arg->str, S("GETACK"))) {
+                // ["replconf", "getack", "*"]
+                assert(ctx->is_connection_to_master);
+                DEBUG_LOG("responding to replconf get ack");
+                assert(resp_array->count == 3);
+                assert(resp_array->elts[2]->type == BULK_STRING);
+                s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
+                assert(s8equals(arg_2_value, S("*")));
+                char *items[3] = {"REPLCONF", "ACK", "0"};
+                send_response_array(ctx->conn_fd, items, 3);
             }
             send_response(ctx->conn_fd, okMsg);
         } else if (s8equals(command->str, S("PSYNC")) == true) {
