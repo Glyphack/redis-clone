@@ -379,11 +379,6 @@ void *connection_handler(void *arg) {
             continue;
         }
 
-        // TODO: if the command could not be processed then do not add to the offset
-        if (ctx->is_connection_to_master) {
-            offset += buffer.total_read;
-        }
-
         RespArray *resp_array = (RespArray *) request.val;
         if (resp_array->count == 0) {
             printf("Request invalid\n");
@@ -603,6 +598,10 @@ void *connection_handler(void *arg) {
         } else {
             printf("Unknown command\n");
             keep_alive = 0;
+        }
+        // TODO: if the command could not be processed then do not add to the offset
+        if (ctx->is_connection_to_master) {
+            offset += buffer.total_read;
         }
     }
 
