@@ -45,6 +45,8 @@ typedef struct {
     int   length;
     int   capacity;
     int   client_fd;
+    // total bytes read until the command is processed
+    int total_read;
 } RequestParserBuffer;
 
 BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer);

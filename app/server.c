@@ -358,15 +358,19 @@ void *connection_handler(void *arg) {
     int                 req_size = 64 * 1024; // 64KB chunks
     char               *buf      = new (ctx->thread_allocator, byte, req_size);
     RequestParserBuffer buffer   = (RequestParserBuffer) {
-          .buffer    = buf,
-          .cursor    = 0,
-          .length    = 0,
-          .capacity  = req_size,
-          .client_fd = client_fd,
+          .buffer     = buf,
+          .cursor     = 0,
+          .length     = 0,
+          .capacity   = req_size,
+          .client_fd  = client_fd,
+          .total_read = 0,
     };
 
+    int offset = 0;
+
     while (keep_alive) {
-        Request request = parse_request(ctx->thread_allocator, &buffer);
+        buffer.total_read = 0;
+        Request request   = parse_request(ctx->thread_allocator, &buffer);
         DEBUG_LOG("parsed request");
         if (request.empty) {
             break;
@@ -386,6 +390,12 @@ void *connection_handler(void *arg) {
             printf("only supporting array requests\n");
             continue;
         }
+
+        // TODO: if the command could not be processed then do not add to the offset
+        if (ctx->is_connection_to_master) {
+            offset += buffer.total_read;
+        }
+
         RespArray *resp_array = (RespArray *) request.val;
         if (resp_array->count == 0) {
             printf("Request invalid\n");
@@ -562,7 +572,9 @@ void *connection_handler(void *arg) {
                 assert(resp_array->elts[2]->type == BULK_STRING);
                 s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
                 assert(s8equals(arg_2_value, S("*")));
-                char *items[3] = {"REPLCONF", "ACK", "0"};
+                char *offset_str = new (ctx->thread_allocator, char, 10);
+                snprintf(offset_str, 10, "%d", offset);
+                char *items[3] = {"REPLCONF", "ACK", offset_str};
                 send_response_array(ctx->conn_fd, items, 3);
             }
             send_response(ctx->conn_fd, okMsg);

@@ -18,6 +18,7 @@ char getCurrChar(RequestParserBuffer *buffer) {
 char rewindChar(RequestParserBuffer *buffer) {
     if (buffer->cursor > 0) {
         buffer->cursor--;
+        buffer->total_read--;
     }
     return buffer->buffer[buffer->cursor];
 }
@@ -26,6 +27,7 @@ u8 getNextChar(RequestParserBuffer *buffer) {
     if (buffer->cursor < buffer->length) {
         char c = buffer->buffer[buffer->cursor];
         buffer->cursor++;
+        buffer->total_read++;
         return c;
     }
     int bytes_received;
