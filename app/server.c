@@ -112,34 +112,7 @@ int handshake(Config *config) {
         exit(1);
     assert(strncmp(tmp_str, okMsg, nbytes) == 0);
 
-    // Next send the PYSNC
-    char *psync[3] = {
-        "PSYNC",
-        "?",
-        "-1",
-    };
-    send_response_array(master_fd, psync, 3);
-
-    nbytes = recv(master_fd, tmp_str, sizeof tmp_str, 0);
-    if (nbytes <= 0)
-        exit(1);
-    // TODO: strtok unsafe do not use it
-    char *parts = strtok(tmp_str, " ");
-    assert(strcmp(parts, "+FULLRESYNC") == 0);
-    parts             = strtok(NULL, " ");
-    parts             = strtok(NULL, " ");
-    int   repl_offset = 0;
-    char *curr_pos    = parts;
-    while (*parts != '\0') {
-        parts++;
-        if (*parts == '\r') {
-            parts++;
-            if (*parts == '\n') {
-                strncpy(tmp_str, curr_pos, parts - curr_pos);
-                repl_offset = atoi(tmp_str);
-            }
-        }
-    }
+    // Next send the PYSNC is sent in connection_handler
 
     return master_fd;
 }
@@ -352,6 +325,16 @@ void *connection_handler(void *arg) {
 
     int keep_alive = 1;
 
+    if (ctx->is_connection_to_master) {
+        // Finish handshake
+        char *psync[3] = {
+            "PSYNC",
+            "?",
+            "-1",
+        };
+        send_response_array(ctx->conn_fd, psync, 3);
+    }
+
     // If a replica talks in this connection the information will be recorded.
     ReplicaConfig *replica = (ReplicaConfig *) malloc(sizeof(ReplicaConfig));
 
@@ -383,6 +366,11 @@ void *connection_handler(void *arg) {
         // TODO: handle rdb file transfer
         // for now ignore RDB
         if (request.type == BULK_STRING) {
+            continue;
+        }
+
+        // TODO: handle result of +FULLRESYNC
+        if (request.type == SIMPLE_STRING) {
             continue;
         }
 

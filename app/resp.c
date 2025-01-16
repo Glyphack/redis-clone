@@ -107,14 +107,15 @@ SimpleString parse_simple_string(Arena *arena, RequestParserBuffer *buffer) {
     s8           str          = {0};
     SimpleString simpleString = {0};
     // TODO: simple strings have no length. We max it to 50 here.
-    str.data = new (arena, u8, 50);
-    int i    = 0;
+    int MAX_SIMPLE_STRING_SIZE = 1024;
+    str.data                   = new (arena, u8, MAX_SIMPLE_STRING_SIZE);
+    int i                      = 0;
 
     while (curr != '\0') {
         if (curr == '\n' && prev == '\r') {
             return simpleString;
         }
-        if (i > 50) {
+        if (i > MAX_SIMPLE_STRING_SIZE) {
             // We reached max size of simple string and cannot add anymore. Something is wrong.
             UNREACHABLE();
         }
@@ -227,8 +228,8 @@ void *respond_null(int client_fd) {
 }
 
 int send_response(int client_fd, const char *response) {
-    DEBUG_PRINT(response, s);
-    DEBUG_PRINT(strlen(response), lu);
+    // DEBUG_PRINT(response, s);
+    // DEBUG_PRINT(strlen(response), lu);
     int sent = send(client_fd, response, strlen(response), 0);
     if (sent < 0) {
         fprintf(stderr, "Could not send response: %s\n", strerror(errno));
