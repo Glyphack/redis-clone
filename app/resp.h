@@ -1,6 +1,5 @@
 #ifndef RESP_H
 #define RESP_H
-#include "server.h"
 #include "str.h"
 
 
@@ -59,7 +58,7 @@ Request parse_request(Arena *arena, RequestParserBuffer *buffer);
 RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer);
 
 // Response functions
-void *send_response_bulk_string(Context *ctx, s8 str);
+void *send_response_bulk_string(int conn_fd, s8 str);
 void *respond_null(int client_fd);
 long send_response(int client_fd, const char *response);
 void send_response_array(int client_fd, char **items, int size);

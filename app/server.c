@@ -290,7 +290,7 @@ int main(int argc, char *argv[]) {
 
 void handle_echo(Context *ctx, s8 arg) {
     DEBUG_LOG("responding to echo");
-    send_response_bulk_string(ctx, arg);
+    send_response_bulk_string(ctx->conn_fd, arg);
 }
 
 void handle_get(Context *ctx, s8 key) {
@@ -306,7 +306,7 @@ void handle_get(Context *ctx, s8 key) {
         respond_null(ctx->conn_fd);
         return;
     }
-    send_response_bulk_string(ctx, s8_from_cstr(scratch, node->val));
+    send_response_bulk_string(ctx->conn_fd, s8_from_cstr(scratch, node->val));
 }
 
 // TODO if msg is not empty reply back
@@ -366,7 +366,7 @@ void *connection_handler(void *arg) {
         BulkString *command = (BulkString *) command_val->val;
         s8print(command->str);
 
-        if (s8equals(command->str, S("PING")) == true) {
+        if (s8equals_nocase(command->str, S("PING")) == true) {
             s8 arg = S("");
             if (resp_array->count == 2) {
                 Request *arg_val = resp_array->elts[1];
@@ -374,19 +374,19 @@ void *connection_handler(void *arg) {
                 arg = ((BulkString *) arg_val->val)->str;
             }
             handle_ping(ctx, arg);
-        } else if (s8equals(command->str, S("ECHO")) == true) {
+        } else if (s8equals_nocase(command->str, S("ECHO")) == true) {
             assert(resp_array->count == 2);
             Request *command_val = resp_array->elts[1];
             assert(command_val->type == BULK_STRING);
             BulkString *command = (BulkString *) command_val->val;
             handle_echo(ctx, command->str);
-        } else if (s8equals(command->str, S("GET")) == true) {
+        } else if (s8equals_nocase(command->str, S("GET")) == true) {
             assert(resp_array->count == 2);
             Request *command_val = resp_array->elts[1];
             assert(command_val->type == BULK_STRING);
             BulkString *key = (BulkString *) command_val->val;
             handle_get(ctx, key->str);
-        } else if (s8equals(command->str, S("SET")) == true) {
+        } else if (s8equals_nocase(command->str, S("SET")) == true) {
             // TODO: extract this to a function and perform on all write operations
             // Do not propagate from replicas
             if (ctx->replicas != NULL) {
@@ -414,7 +414,7 @@ void *connection_handler(void *arg) {
                 Request *px_val = resp_array->elts[3];
                 assert(px_val->type == BULK_STRING);
                 BulkString *px = (BulkString *) px_val->val;
-                if (!s8equals(px->str, S("px"))) {
+                if (!s8equals_nocase(px->str, S("px"))) {
                     printf("unknown command arguments");
                     keep_alive = 0;
                     continue;
@@ -433,14 +433,14 @@ void *connection_handler(void *arg) {
             hNode->ttl = ttl;
             hashmap_insert(ctx->hashmap, hNode);
 
-            send_response_bulk_string(ctx, S("OK"));
-        } else if (s8equals(command->str, S("KEYS")) == true) {
+            send_response_bulk_string(ctx->conn_fd, S("OK"));
+        } else if (s8equals_nocase(command->str, S("KEYS")) == true) {
             assert(resp_array->count == 2);
             Request *pattern_val = resp_array->elts[1];
             assert(pattern_val->type == BULK_STRING);
             BulkString *pattern = (BulkString *) pattern_val->val;
 
-            if (!s8equals(pattern->str, S("*"))) {
+            if (!s8equals_nocase(pattern->str, S("*"))) {
                 printf("unrecognized pattern");
                 keep_alive = 0;
                 continue;
@@ -452,13 +452,13 @@ void *connection_handler(void *arg) {
                 continue;
             }
             send_response_array(ctx->conn_fd, keys, ctx->hashmap->size);
-        } else if (s8equals(command->str, S("CONFIG")) == true) {
+        } else if (s8equals_nocase(command->str, S("CONFIG")) == true) {
             assert(resp_array->count == 3);
             Request *get_val = resp_array->elts[1];
             assert(get_val->type == BULK_STRING);
             BulkString *get = (BulkString *) get_val->val;
 
-            if (!s8equals(get->str, S("GET"))) {
+            if (!s8equals_nocase(get->str, S("GET"))) {
                 printf("Unknown config argument\n");
                 keep_alive = 0;
                 continue;
@@ -476,13 +476,13 @@ void *connection_handler(void *arg) {
 
             char *resps[2] = {s8_to_cstr(ctx->thread_allocator, arg->str), config_val};
             send_response_array(ctx->conn_fd, resps, 2);
-        } else if (s8equals(command->str, S("INFO")) == true) {
+        } else if (s8equals_nocase(command->str, S("INFO")) == true) {
             assert(resp_array->count == 2);
             Request *section_val = resp_array->elts[1];
             assert(section_val->type == BULK_STRING);
             BulkString *section = (BulkString *) section_val->val;
 
-            if (!s8equals(section->str, S("replication"))) {
+            if (!s8equals_nocase(section->str, S("replication"))) {
                 // no info other than replication supported
                 UNREACHABLE();
             }
@@ -502,24 +502,24 @@ void *connection_handler(void *arg) {
             offset += sprintf(response + offset, "master_repl_offset:%d\n",
                               ctx->config->master_repl_offset);
 
-            send_response_bulk_string(ctx, s8_from_cstr(scratch, response));
-        } else if (s8equals(command->str, S("REPLCONF")) == true) {
+            send_response_bulk_string(ctx->conn_fd, s8_from_cstr(scratch, response));
+        } else if (s8equals_nocase(command->str, S("REPLCONF")) == true) {
             assert(resp_array->count == 3);
             Request *arg_val = resp_array->elts[1];
             assert(arg_val->type == BULK_STRING);
             BulkString *arg = (BulkString *) arg_val->val;
 
-            if (s8equals(arg->str, S("listening-port"))) {
+            if (s8equals_nocase(arg->str, S("listening-port"))) {
                 Request *port_val = resp_array->elts[2];
                 assert(port_val->type == BULK_STRING);
                 BulkString *port_str = (BulkString *) port_val->val;
                 replica->port        = atoi(s8_to_cstr(ctx->thread_allocator, port_str->str));
                 send_response(ctx->conn_fd, okMsg);
-            } else if (s8equals(arg->str, S("capa"))) {
+            } else if (s8equals_nocase(arg->str, S("capa"))) {
                 Request *capa_val = resp_array->elts[2];
                 assert(capa_val->type == BULK_STRING);
                 BulkString *capa = (BulkString *) capa_val->val;
-                if (!s8equals(capa->str, S("psync2"))) {
+                if (!s8equals_nocase(capa->str, S("psync2"))) {
                     printf("%s is not supported", s8_to_cstr(ctx->thread_allocator, capa->str));
                     UNREACHABLE();
                 }
@@ -527,7 +527,7 @@ void *connection_handler(void *arg) {
             } else {
                 UNREACHABLE();
             }
-        } else if (s8equals(command->str, S("PSYNC")) == true) {
+        } else if (s8equals_nocase(command->str, S("PSYNC")) == true) {
             assert(resp_array->count == 3);
             Request *arg1_val = resp_array->elts[1];
             Request *arg2_val = resp_array->elts[2];
@@ -536,7 +536,7 @@ void *connection_handler(void *arg) {
             BulkString *arg1 = (BulkString *) arg1_val->val;
             BulkString *arg2 = (BulkString *) arg2_val->val;
 
-            if (s8equals(arg1->str, S("?")) && s8equals(arg2->str, S("-1"))) {
+            if (s8equals_nocase(arg1->str, S("?")) && s8equals_nocase(arg2->str, S("-1"))) {
                 char response[100];
                 sprintf(response, "+FULLRESYNC %s 0\r\n", ctx->config->master_replid);
                 send_response(ctx->conn_fd, response);
@@ -628,7 +628,7 @@ void *master_connection_handler(void *arg) {
         BulkString *command = (BulkString *) command_val->val;
         s8print(command->str);
 
-        if (s8equals(command->str, S("SET")) == true) {
+        if (s8equals_nocase(command->str, S("SET")) == true) {
             assert(resp_array->count >= 3);
             Request *key_val = resp_array->elts[1];
             Request *val_val = resp_array->elts[2];
@@ -642,7 +642,7 @@ void *master_connection_handler(void *arg) {
                 Request *px_val = resp_array->elts[3];
                 assert(px_val->type == BULK_STRING);
                 BulkString *px = (BulkString *) px_val->val;
-                if (!s8equals(px->str, S("px"))) {
+                if (!s8equals_nocase(px->str, S("px"))) {
                     printf("unknown command arguments");
                     keep_alive = 0;
                     continue;
@@ -660,20 +660,20 @@ void *master_connection_handler(void *arg) {
             strcpy(hNode->val, s8_to_cstr(ctx->thread_allocator, val->str));
             hNode->ttl = ttl;
             hashmap_insert(ctx->hashmap, hNode);
-        } else if (s8equals(command->str, S("REPLCONF")) == true) {
+        } else if (s8equals_nocase(command->str, S("REPLCONF")) == true) {
             assert(resp_array->count == 3);
             Request *arg_val = resp_array->elts[1];
             assert(arg_val->type == BULK_STRING);
             BulkString *arg = (BulkString *) arg_val->val;
 
-            if (s8equals(arg->str, S("GETACK"))) {
+            if (s8equals_nocase(arg->str, S("GETACK"))) {
                 // ["replconf", "getack", "*"]
                 DEBUG_LOG("responding to replconf get ack");
                 DEBUG_PRINT(repl_offset, d);
                 assert(resp_array->count == 3);
                 assert(resp_array->elts[2]->type == BULK_STRING);
                 s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
-                assert(s8equals(arg_2_value, S("*")));
+                assert(s8equals_nocase(arg_2_value, S("*")));
                 char *offset_str = new (ctx->thread_allocator, char, 10);
                 snprintf(offset_str, 10, "%d", repl_offset);
                 char *items[3] = {"REPLCONF", "ACK", offset_str};
@@ -681,6 +681,33 @@ void *master_connection_handler(void *arg) {
             } else {
                 UNREACHABLE();
             }
+        } else if (s8equals_nocase(command->str, S("INFO")) == true) {
+            assert(resp_array->count == 2);
+            Request *section_val = resp_array->elts[1];
+            assert(section_val->type == BULK_STRING);
+            BulkString *section = (BulkString *) section_val->val;
+
+            if (!s8equals_nocase(section->str, S("replication"))) {
+                // no info other than replication supported
+                UNREACHABLE();
+            }
+
+            Arena *scratch    = &(*ctx->thread_allocator);
+            int    total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
+            total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
+            total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
+            total_size += 1;                                      // null terminator
+
+            char *response = new (scratch, byte, total_size);
+            int   offset   = 0;
+
+            offset += sprintf(response + offset, "role:%s\n",
+                              ctx->config->master_info != NULL ? "slave" : "master");
+            offset += sprintf(response + offset, "master_replid:%s\n", ctx->config->master_replid);
+            offset += sprintf(response + offset, "master_repl_offset:%d\n",
+                              ctx->config->master_repl_offset);
+
+            send_response_bulk_string(ctx->master_conn, s8_from_cstr(scratch, response));
         } else {
             printf("Unknown request type\n");
         }

@@ -37,6 +37,28 @@ b32 s8equals(s8 a, s8 b) {
     return memcmp(a.data, b.data, a.len) == 0;
 }
 
+b32 s8equals_nocase(s8 a, s8 b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (size i = 0; i < a.len; i++) {
+        if (a.data[i] != b.data[i]) {
+            u8 a_lower = a.data[i];
+            if (a.data[i] >= 'A' && a.data[i] <= 'Z')
+                a_lower = upper_to_lower[a.data[i]];
+            u8 b_lower = b.data[i];
+            if (b.data[i] >= 'A' && b.data[i] <= 'Z')
+                b_lower = upper_to_lower[b.data[i]];
+
+            if (a_lower != b_lower) {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+
 // Compares two strings lexicographically
 size s8compare(s8 a, s8 b) {
     size min_len = a.len < b.len ? a.len : b.len;

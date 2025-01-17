@@ -207,23 +207,22 @@ Request parse_request(Arena *arena, RequestParserBuffer *buffer) {
     return request;
 }
 
-void *send_response_bulk_string(Context *ctx, s8 str) {
+void *send_response_bulk_string(int conn_fd, s8 str) {
     // 1 (for '$') + number of digits in str.len + 2 (\r\n) + str.len + 2 (\r\n) + 1 (null
     // terminator)
     int num_len  = 1;
     int len_copy = (int) str.len;
     while (len_copy /= 10)
         num_len++;
-    int   response_len = 1 + num_len + 2 + (int) str.len + 2 + 1;
-    char *response     = new (&(*ctx->thread_allocator), char, response_len);
+    int  response_len = 1 + num_len + 2 + (int) str.len + 2 + 1;
+    char response[response_len];
 
     snprintf(response, response_len, "$%zu\r\n%.*s\r\n", str.len, (int) str.len, str.data);
     response[response_len - 1] = '\0';
     printf("responding with `%s`", response);
-    long sent = send(ctx->conn_fd, response, response_len - 1, 0);
+    long sent = send(conn_fd, response, response_len - 1, 0);
     if (sent < 0) {
-        fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-    } else {
+        perror("Could not send response:");
     }
     return NULL;
 }
