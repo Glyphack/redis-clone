@@ -74,6 +74,24 @@ long min(long a, long b) {
     return a < b ? a : b;
 }
 
+RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer) {
+    long len = read_len(buffer);
+    s8   raw = (s8) {.len = len, .data = new (arena, u8, len)};
+
+    long len_to_copy = min(buffer->length - buffer->cursor, len);
+    memcpy(raw.data, buffer->buffer + buffer->cursor, len_to_copy);
+    buffer->cursor += len_to_copy;
+    buffer->total_read += len_to_copy;
+    len_to_copy = len - len_to_copy;
+    if (len_to_copy > 0) {
+        for (int i = 0; i < len_to_copy; i++) {
+            raw.data[i] = getNextChar(buffer);
+        }
+    }
+
+    return (RdbMessage) {.raw = raw};
+}
+
 BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
     long len = read_len(buffer);
     s8   str = (s8) {.len = len, .data = new (arena, u8, len)};

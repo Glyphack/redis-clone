@@ -28,8 +28,15 @@ typedef struct {
     Arena* thread_allocator;
     Arena* main_arena;
     vector* replicas;
-    int is_connection_to_master;
 } Context;
+
+typedef struct {
+    int master_conn;
+    HashMap* hashmap;
+    Config* config;
+    Arena* thread_allocator;
+    int handshake_done;
+} ReplicationContext;
 
 
 typedef struct {
@@ -39,5 +46,6 @@ typedef struct {
 } ReplicaConfig;
 
 void* connection_handler(void* arg);
+void *master_connection_handler(void *arg);
 void send_response_array(int client_fd, char** items, int size);
 #endif

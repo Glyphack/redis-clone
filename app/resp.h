@@ -19,6 +19,10 @@ typedef struct {
 } BulkString;
 
 typedef struct {
+    s8 raw;
+} RdbMessage;
+
+typedef struct {
     s8 str;
 } SimpleString;
 
@@ -49,13 +53,10 @@ typedef struct {
 } RequestParserBuffer;
 
 BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer);
-
 SimpleString parse_simple_string(Arena *arena, RequestParserBuffer *buffer);
-
 RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer);
-
 Request parse_request(Arena *arena, RequestParserBuffer *buffer);
-
+RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer);
 
 // Response functions
 void *send_response_bulk_string(Context *ctx, s8 str);
