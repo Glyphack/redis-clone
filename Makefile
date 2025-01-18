@@ -1,5 +1,4 @@
 CC = clang
-CFLAGS = -std=c23 -Wall -Wextra -O2
 
 OUTPUT ?= bin
 
@@ -10,5 +9,8 @@ build: app/*.c app/*.h
 
 test: 
 	python test/test.py
+
+benchmark:
+	redis-benchmark -t set -c 2 -n 5
 
 .PHONY: test run build

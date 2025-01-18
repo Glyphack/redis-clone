@@ -55,7 +55,12 @@ void *getConfig(Config *config, char *name) {
     if (strcmp(name, "dbfilename") == 0) {
         return config->dbfilename;
     }
-
+    if (strcmp(name, "appendonly") == 0) {
+        return "no"; // Explicitly disable AOF persistence
+    }
+    if (strcmp(name, "save") == 0) {
+        return ""; // Empty string means RDB persistence is disabled
+    }
     return NULL;
 }
 
@@ -273,7 +278,6 @@ int main(int argc, char *argv[]) {
         context->config           = config;
         context->replicas         = replicas;
         context->thread_allocator = thread_allocator;
-        context->main_arena       = &arena;
         if (pthread_create(&thread_id, NULL, connection_handler, context) != 0) {
             perror("Could not create thread");
             return 1;
@@ -347,7 +351,7 @@ void *connection_handler(void *arg) {
     while (keep_alive) {
         buffer.total_read = 0;
         Request request   = parse_request(ctx->thread_allocator, &buffer);
-        printf("parsed request %d\n", request.type);
+        DEBUG_PRINT_F("parsed request %d\n", request.type);
         DEBUG_PRINT(buffer.total_read, lu);
         if (request.empty) {
             break;
@@ -364,7 +368,6 @@ void *connection_handler(void *arg) {
         Request *command_val = resp_array->elts[0];
         assert(command_val->type == BULK_STRING);
         BulkString *command = (BulkString *) command_val->val;
-        s8print(command->str);
 
         if (s8equals_nocase(command->str, S("PING")) == true) {
             s8 arg = S("");
@@ -598,7 +601,7 @@ void *master_connection_handler(void *arg) {
     while (keep_alive) {
         buffer.total_read = 0;
         Request request   = parse_request(ctx->thread_allocator, &buffer);
-        printf("parsed request %d\n", request.type);
+        DEBUG_PRINT_F("parsed request %d\n", request.type);
         DEBUG_PRINT(buffer.total_read, lu);
         if (request.empty) {
             break;

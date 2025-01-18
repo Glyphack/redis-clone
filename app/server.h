@@ -26,7 +26,6 @@ typedef struct {
     HashMap* hashmap;
     Config* config;
     Arena* thread_allocator;
-    Arena* main_arena;
     vector* replicas;
 } Context;
 

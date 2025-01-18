@@ -4,7 +4,7 @@
 #include "arena.h"
 
 #define MAX_ENTRY_STR_SIZE 1024
-#define MAX_MAP_SIZE 1024
+#define MAX_MAP_SIZE 100000
 
 typedef struct {
     char* key;

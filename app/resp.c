@@ -39,9 +39,10 @@ u8 getNextChar(RequestParserBuffer *buffer) {
         return '\0';
     }
 
-    printf("received request: %.*s\n", (int) bytes_received, buffer->buffer);
+    DEBUG_PRINT_F("received request: %.*s\n", (int) bytes_received, buffer->buffer);
     if (bytes_received < 0) {
-        UNREACHABLE();
+        perror("cannot read from client");
+        return '\0';
     }
     buffer->length = bytes_received;
     buffer->cursor = 0;
@@ -219,7 +220,7 @@ void *send_response_bulk_string(int conn_fd, s8 str) {
 
     snprintf(response, response_len, "$%zu\r\n%.*s\r\n", str.len, (int) str.len, str.data);
     response[response_len - 1] = '\0';
-    printf("responding with `%s`", response);
+    DEBUG_PRINT_F("responding with `%s`", response);
     long sent = send(conn_fd, response, response_len - 1, 0);
     if (sent < 0) {
         perror("Could not send response:");
@@ -231,7 +232,7 @@ void *respond_null(int client_fd) {
     char response[6];
     response[5] = '\0';
     snprintf(response, sizeof(response), "$%d\r\n", -1);
-    printf("responding with `%s`", response);
+    DEBUG_PRINT_F("responding with `%s`", response);
     long sent = send(client_fd, response, 5, 0);
     if (sent < 0) {
         fprintf(stderr, "Could not send response: %s\n", strerror(errno));
