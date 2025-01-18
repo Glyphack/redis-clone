@@ -61,7 +61,7 @@ int read_len(RequestParserBuffer *buffer) {
         }
         if (curr != '\r') {
             // assert curr is a digit
-            assert(curr >= '0' && curr <= '9');
+            assert_with_print(curr >= '0' && curr <= '9', "%c", curr);
             len = len * 10;
             len += curr - '0';
         }
@@ -76,6 +76,10 @@ long min(long a, long b) {
 }
 
 RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer) {
+    char curr = getNextChar(buffer);
+    if (curr != '$') {
+        printf("Expected $ but got %c\n", curr);
+    }
     long len = read_len(buffer);
     s8   raw = (s8) {.len = len, .data = new (arena, u8, len)};
 
