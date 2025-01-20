@@ -246,16 +246,16 @@ void *respond_null(int client_fd) {
 }
 
 long send_response(int client_fd, const char *response) {
-    // DEBUG_PRINT(response, s);
-    // DEBUG_PRINT(strlen(response), lu);
+    DEBUG_PRINT(response, s);
+    DEBUG_PRINT(strlen(response), lu);
     long sent = send(client_fd, response, strlen(response), 0);
     if (sent < 0) {
         fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-    } else {
     }
     return sent;
 }
 
+// TODO: use s8 instead of char**
 void send_response_array(int client_fd, char **items, int size) {
     char response[RESPONSE_ITEM_MAX_SIZE * size + size % 10 + 5];
     sprintf(response, "*%d\r\n", size);

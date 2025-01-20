@@ -1,5 +1,6 @@
 #include "rdb.h"
 #include "common.h"
+#include "hashmap.h"
 #include "str.h"
 #include "types.h"
 #include <stddef.h>
@@ -31,15 +32,15 @@ ret:
     return data;
 }
 
-uint16_t read_little_endian_16(char *bytes) {
+uint16_t read_little_endian_16(u8 *bytes) {
     return (uint16_t) (bytes[0] | (bytes[1] << 8));
 }
 
-uint32_t read_little_endian_32(char *bytes) {
+uint32_t read_little_endian_32(u8 *bytes) {
     return (uint32_t) (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24));
 }
 
-int64_t read_little_endian_64(char *bytes) {
+int64_t read_little_endian_64(u8 *bytes) {
     int64_t result;
     memcpy(&result, bytes, 8);
     return result;
@@ -68,8 +69,8 @@ void print_rdb_value(const AuxValue *aux) {
     }
 }
 // TODO: prefer u8 over char
-int parse_rdb_len_encoding(char **cursor, int *special_format) {
-    char *p         = *cursor;
+int parse_rdb_len_encoding(u8 **cursor, int *special_format) {
+    u8 *p           = *cursor;
     *special_format = -1;
     int mode        = (*p & 0b11000000) >> 6;
     int len         = 0;
@@ -117,7 +118,7 @@ int parse_rdb_len_encoding(char **cursor, int *special_format) {
 }
 
 // TODO: prefer u8 over char
-int parse_len_encoded_string(char **cursor, int size, AuxValue *aux_value) {
+int parse_len_encoded_string(u8 **cursor, int size, AuxValue *aux_value) {
     char *p = *cursor;
     if (size <= 0) {
         fprintf(stderr, "invalid size %d\n", size);
@@ -131,7 +132,7 @@ int parse_len_encoded_string(char **cursor, int size, AuxValue *aux_value) {
 }
 
 // TODO: prefer u8 over char
-int parse_integer_encoded_as_string(char **cursor, int special_mode) {
+int parse_integer_encoded_as_string(u8 **cursor, int special_mode) {
     // 0 indicates that an 8 bit integer follows
     int   result = 0;
     char *p      = *cursor;
@@ -172,11 +173,7 @@ void print_rdb(const RdbContent *rdb) {
         printf("database number: %d\n", db->num);
         printf("hash size: %d\n", db->resizedb_hash);
         printf("expiry size: %d\n", db->resizedb_expiry);
-        for (int j = 0; j < db->data->size; j++) {
-            printf("key : %s\n", db->data->nodes[j]->key);
-            printf("value : %s\n", db->data->nodes[j]->val);
-            printf("expiration: %lld\n", db->data->nodes[j]->ttl);
-        }
+        hashmap_print(db->data);
     }
 }
 
@@ -224,19 +221,20 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
                 AuxValue *value = new (arena, AuxValue);
 
                 int special_format;
-                int len = parse_rdb_len_encoding((char **) &p, &special_format);
-                parse_len_encoded_string((char **) &p, len, name);
+                int len = parse_rdb_len_encoding(&p, &special_format);
+                parse_len_encoded_string(&p, len, name);
                 // name is always str
                 name->type = AUX_TYPE_STRING;
                 push_vec(rdbContent->metadata, name);
 
-                len = parse_rdb_len_encoding((char **) &p, &special_format);
+                len = parse_rdb_len_encoding(&p, &special_format);
                 if (special_format == -1) {
                     value->type = AUX_TYPE_STRING;
-                    parse_len_encoded_string((char **) &p, len, value);
+                    parse_len_encoded_string(&p, len, value);
                 } else {
                     value->type = AUX_TYPE_INT;
-                    int result  = parse_integer_encoded_as_string((char **) &p, special_format);
+                    int result  = parse_integer_encoded_as_string(&p, special_format);
+                    DEBUG_PRINT(result, d);
                     value->value.int_value = result;
                 }
                 push_vec(rdbContent->metadata, value);
@@ -258,9 +256,9 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
         if (2 == section_number) {
             rdbContent->databases = initialize_vec();
             RdbDatabase *rdb_db   = new (arena, RdbDatabase);
-            rdb_db->data          = hashmap_init();
+            rdb_db->data          = 0;
             int special_format;
-            int db_num = parse_rdb_len_encoding((char **) &p, &special_format);
+            int db_num = parse_rdb_len_encoding(&p, &special_format);
             if (special_format != -1) {
                 fprintf(stderr, "expected special format to be 0 for database id");
             }
@@ -268,11 +266,11 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
             if (*p == 0xFB) {
                 p++;
                 int sf;
-                int db_hash_size = parse_rdb_len_encoding((char **) &p, &sf);
+                int db_hash_size = parse_rdb_len_encoding(&p, &sf);
                 if (sf != -1) {
                     fprintf(stderr, "expected special format to be 0 for database id");
                 }
-                int db_expiry_size = parse_rdb_len_encoding((char **) &p, &sf);
+                int db_expiry_size = parse_rdb_len_encoding(&p, &sf);
                 if (sf != -1) {
                     fprintf(stderr, "expected special format to be 0 for database id");
                 }
@@ -301,24 +299,24 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
                 int value_type = (int) *p;
                 p++;
 
-                HashMapNode *node = hashmap_node_init();
+                HashMapNode *node = new (arena, HashMapNode);
                 switch (value_type) {
                 case 0:; // cannot define after case
                     AuxValue key, value;
                     int      sf, len;
-                    len = parse_rdb_len_encoding((char **) &p, &sf);
+                    len = parse_rdb_len_encoding(&p, &sf);
                     if (sf != -1) {
                         UNREACHABLE();
                     }
-                    parse_len_encoded_string((char **) &p, len, &key);
+                    parse_len_encoded_string(&p, len, &key);
                     sf  = 0;
-                    len = parse_rdb_len_encoding((char **) &p, &sf);
+                    len = parse_rdb_len_encoding(&p, &sf);
                     if (sf != -1) {
                         UNREACHABLE();
                     }
-                    parse_len_encoded_string((char **) &p, len, &value);
-                    node->key = s8_to_cstr(arena, key.value.str_value);
-                    node->val = s8_to_cstr(arena, value.value.str_value);
+                    parse_len_encoded_string(&p, len, &value);
+                    node->key = s8malloc(key.value.str_value);
+                    node->val = s8malloc(value.value.str_value);
                     break;
                 default:
                     UNREACHABLE();
@@ -341,7 +339,7 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
                     break;
                 }
 
-                hashmap_insert(rdb_db->data, node);
+                hashmap_upsert(&rdb_db->data, arena, node);
             }
 
             push_vec(rdbContent->databases, rdb_db);

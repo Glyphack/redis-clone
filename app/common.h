@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <stdio.h>
 
+// #define DEBUG_PRINT(x, format) printf("%s: %" #format "\n", #x, x)
+// #define DEBUG_LOG(msg) printf("%s\n", msg)
+// #define DEBUG_PRINT_F(format, ...) printf(format, __VA_ARGS__)
 #define DEBUG_PRINT(x, format) /* printf("%s: %" #format "\n", #x, x) */
 #define DEBUG_LOG(msg) /* printf("%s\n", msg) */
 #define DEBUG_PRINT_F(format, ...) /* printf(format, __VA_ARGS__) */

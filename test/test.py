@@ -45,24 +45,18 @@ redis-ver
 redis-bits
 64
 ctime
--11
+1735924725
 used-mem
--6336
+1173312
 aof-base
 0
 databases
 database number: 0
 hash size: 3
 expiry size: 1
-key : mykey2
-value : val2
-expiration: -1
-key : mykey
-value : val
-expiration: -1
-key : key
-value : value
-expiration: 1735925226569""".strip(),
+key: mykey2, val: val2 exp: -1
+key: mykey, val: val exp: -1
+key: key, val: value exp: 1735925226569""".strip(),
         "redis_commands": [],
         "command_outputs": [],
     },

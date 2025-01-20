@@ -1,63 +1,92 @@
 #include "hashmap.h"
+#include "common.h"
+#include "str.h"
+#include "types.h"
+#include "vec.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-HashMapNode *hashmap_node_init() {
-    HashMapNode *hNode = (HashMapNode *) malloc(sizeof(HashMapNode));
-    hNode->key         = (char *) malloc(MAX_ENTRY_STR_SIZE);
-    hNode->val         = (char *) malloc(MAX_ENTRY_STR_SIZE);
-    return hNode;
+void hashmap_upsert(HashMap **map, Arena *arena, HashMapNode *node) {
+    for (u64 h = hash(node->key); *map; h <<= 2) {
+        if (s8equals((*map)->node.key, node->key)) {
+            (*map)->node.val = node->val;
+            (*map)->node.ttl = node->ttl;
+            return;
+        }
+        map = (HashMap **) &(*map)->children[h >> 62];
+    }
+    *map             = new (arena, HashMap);
+    (*map)->node.key = node->key;
+    (*map)->node.val = node->val;
+    (*map)->node.ttl = node->ttl;
 }
 
-HashMap *hashmap_init() {
-    HashMap *h = malloc(sizeof(HashMap));
-
-    for (int i = 0; i < MAX_MAP_SIZE; i++) {
-        h->nodes[i] = 0;
+void hashmap_upsert_atomic(HashMap **map, Arena *arena, HashMapNode *input) {
+    for (u64 h = hash(input->key);; h <<= 2) {
+        HashMap *n = __atomic_load_n(map, __ATOMIC_ACQUIRE);
+        if (!n) {
+            Arena rollback = *arena;
+            HashMap *new   = new (arena, HashMap);
+            new->node.key  = input->key;
+            new->node.val  = input->val;
+            new->node.ttl  = input->ttl;
+            int pass       = __ATOMIC_RELEASE;
+            int fail       = __ATOMIC_ACQUIRE;
+            if (__atomic_compare_exchange_n(map, &n, new, false, pass, fail)) {
+                return;
+            }
+            *arena = rollback;
+        } else if (s8equals(n->node.key, input->key)) {
+            return;
+        }
+        map = n->children + (h >> 62);
     }
-    h->size     = 0;
-    h->capacity = MAX_MAP_SIZE;
+}
+
+HashMapNode hashmap_get(HashMap *map, s8 key) {
+    for (u64 h = hash(key); map; h <<= 2) {
+        if (s8equals(map->node.key, key)) {
+            return (HashMapNode) {.key = map->node.key, .val = map->node.val, .ttl = map->node.ttl};
+        }
+        map = (HashMap *) (map)->children[h >> 62];
+    }
+    return (HashMapNode) {0};
+}
+
+void hashmap_keys(HashMap *h, vector *result) {
+    if (!h) {
+        return;
+    }
+    if (h->node.key.len == 0) {
+        return;
+    }
+    char *key = malloc(h->node.key.len + 1);
+    memcpy(key, h->node.key.data, h->node.key.len);
+    key[h->node.key.len] = '\0';
+    push_vec(result, key);
+    for (int i = 0; i < 4; i++) {
+        if (h->children[i]) {
+            hashmap_keys((HashMap *) h->children[i], result);
+        }
+    }
+}
+
+u64 hash(s8 s) {
+    u64 h = 0x100;
+    for (ptrdiff_t i = 0; i < s.len; i++) {
+        h ^= s.data[i];
+        h *= 1111111111111111111u;
+    }
     return h;
 }
 
-void hashmap_insert(HashMap *h, HashMapNode *node) {
-    int index = -1;
-    for (int i = 0; i < h->size; i++) {
-        HashMapNode *existingNode = h->nodes[i];
-        if (strcmp(existingNode->key, node->key) == 0) {
-            index = i;
-            break;
-        }
-    }
-    if (index != -1) {
-        h->nodes[index] = node;
+void hashmap_print(HashMap *h) {
+    if (h == NULL) {
         return;
     }
-
-    if (h->size == h->capacity) {
-        printf("hashmap capacity reached");
-        return;
+    printf("key: %s, val: %s exp: %lld\n", h->node.key.data, h->node.val.data, h->node.ttl);
+    for (int i = 0; i < 4; i++) {
+        hashmap_print((HashMap *) h->children[i]);
     }
-
-    h->nodes[h->size++] = node;
-}
-
-HashMapNode *hashmap_get(HashMap *h, char *key) {
-    for (int i = 0; i < h->size; i++) {
-        if (strcmp(h->nodes[i]->key, key) == 0) {
-            return h->nodes[i];
-        }
-    }
-    return NULL;
-}
-
-char **hashmap_keys(HashMap *h) {
-    char **array = (char **) malloc(h->size * sizeof(char *));
-    for (int i = 0; i < h->size; i++) {
-        HashMapNode *node = h->nodes[i];
-        array[i]          = (char *) malloc((strlen(node->key) + 1) * sizeof(char));
-        strcpy(array[i], node->key);
-    }
-    return array;
 }

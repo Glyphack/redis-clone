@@ -2,6 +2,7 @@
 #include "arena.h"
 #include "types.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 s8 s8_from_cstr(Arena *arena, const char *cstr) {
@@ -105,10 +106,19 @@ s8 s8trim(s8 str) {
 }
 
 // Creates a copy of the string in the provided arena
-s8 s8clone(s8 str, Arena *arena) {
+s8 s8clone(Arena *arena, s8 str) {
     s8 result;
     result.len  = str.len;
     result.data = new (arena, u8, str.len);
+    memcpy(result.data, str.data, str.len);
+    return result;
+}
+
+// Creates a copy of the string using malloc
+s8 s8malloc(s8 str) {
+    s8 result;
+    result.len  = str.len;
+    result.data = malloc(str.len);
     memcpy(result.data, str.data, str.len);
     return result;
 }

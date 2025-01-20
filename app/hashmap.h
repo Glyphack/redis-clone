@@ -1,29 +1,34 @@
 #ifndef HASHMAP_H
 #define HASHMAP_H
 
-#include "arena.h"
-
-#define MAX_ENTRY_STR_SIZE 1024
-#define MAX_MAP_SIZE 100000
+#include "str.h"
+#include "vec.h"
+#include <stdint.h>
 
 typedef struct {
-    char* key;
-    char* val;
+    s8 key;
+    s8 val;
     long long ttl;
+    u64 version;
 } HashMapNode;
 
-typedef struct {
-    HashMapNode* nodes[MAX_MAP_SIZE];
-    int size;
-    int capacity;
-    Arena* arena;  // Added arena field
-} HashMap;
+// Capacity 4^32
+struct HashMap {
+    struct HashMap *children[4];
+    HashMapNode node;
+};
+
+typedef struct HashMap HashMap;
+
 
 // Function declarations
-HashMap* hashmap_init();
-HashMapNode* hashmap_node_init();
-void hashmap_insert(HashMap* h, HashMapNode* node);
-HashMapNode* hashmap_get(HashMap* h, char* key);
-char** hashmap_keys(HashMap* h);
+void hashmap_upsert(HashMap**,Arena *, HashMapNode*);
+void hashmap_upsert_atomic(HashMap**,Arena *, HashMapNode*);
+HashMapNode hashmap_get(HashMap *, s8);
+void hashmap_keys(HashMap*, vector*);
+
+void hashmap_print(HashMap*);
+
+uint64_t hash(s8);
 
 #endif 

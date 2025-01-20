@@ -127,7 +127,8 @@ int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
-    Arena arena = newarena(100 * 1024 * 1024);
+    Arena arena         = newarena(1000000 * 1024);
+    Arena hashmap_arena = newarena(1000000 * 1024);
 
     Config *config      = new (&arena, Config);
     config->dbfilename  = NULL;
@@ -187,7 +188,7 @@ int main(int argc, char *argv[]) {
 
     print_config(config);
 
-    HashMap *hashmap = hashmap_init();
+    HashMap *hashmap = 0;
 
     if (config->dir && config->dbfilename) {
         char full_path[MAX_PATH];
@@ -251,9 +252,10 @@ int main(int argc, char *argv[]) {
         *thread_allocator           = newarena(10 * 1024 * 1024);
         ReplicationContext *context = malloc(sizeof(ReplicationContext));
         context->master_conn        = master_fd;
-        context->hashmap            = hashmap;
+        context->hashmap            = &hashmap;
         context->config             = config;
-        context->thread_allocator   = thread_allocator;
+        context->scratch            = thread_allocator;
+        context->perm               = &hashmap_arena;
         if (pthread_create(&replication_thread_id, NULL, master_connection_handler, context) != 0) {
             perror("Could not create thread");
             return 1;
@@ -270,14 +272,15 @@ int main(int argc, char *argv[]) {
 
     int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
     while (client_fd) {
-        Arena *thread_allocator   = new (&arena, Arena);
-        *thread_allocator         = newarena(10 * 1024 * 1024);
-        Context *context          = malloc(sizeof(Context));
-        context->conn_fd          = client_fd;
-        context->hashmap          = hashmap;
-        context->config           = config;
-        context->replicas         = replicas;
-        context->thread_allocator = thread_allocator;
+        Arena *thread_allocator = new (&arena, Arena);
+        *thread_allocator       = newarena(10 * 1024 * 1024);
+        Context *context        = malloc(sizeof(Context));
+        context->conn_fd        = client_fd;
+        context->hashmap        = &hashmap;
+        context->config         = config;
+        context->replicas       = replicas;
+        context->scratch        = thread_allocator;
+        context->perm           = &hashmap_arena;
         if (pthread_create(&thread_id, NULL, connection_handler, context) != 0) {
             perror("Could not create thread");
             return 1;
@@ -299,18 +302,17 @@ void handle_echo(Context *ctx, s8 arg) {
 
 void handle_get(Context *ctx, s8 key) {
     printf("responding to get\n");
-    Arena       *scratch = &(*ctx->thread_allocator);
-    HashMapNode *node    = hashmap_get(ctx->hashmap, s8_to_cstr(scratch, key));
-    if (node == NULL) {
+    HashMapNode node = hashmap_get(*ctx->hashmap, key);
+    if (node.key.len == 0) {
         respond_null(ctx->conn_fd);
         return;
     }
-    if (node->ttl != -1 && node->ttl < get_current_time()) {
-        printf("item expired ttl: %lld \n", node->ttl);
+    if (node.ttl != -1 && node.ttl < get_current_time()) {
+        printf("item expired ttl: %lld \n", node.ttl);
         respond_null(ctx->conn_fd);
         return;
     }
-    send_response_bulk_string(ctx->conn_fd, s8_from_cstr(scratch, node->val));
+    send_response_bulk_string(ctx->conn_fd, node.val);
 }
 
 // TODO if msg is not empty reply back
@@ -320,7 +322,7 @@ void handle_ping(Context *ctx, s8 msg) {
         send_response(ctx->conn_fd, pongMsg);
         return;
     }
-    send_response(ctx->conn_fd, s8_to_cstr(ctx->thread_allocator, msg));
+    send_response(ctx->conn_fd, s8_to_cstr(ctx->scratch, msg));
 }
 
 RequestParserBuffer buffered_reader(Arena *arena, int conn_fd) {
@@ -346,13 +348,12 @@ void *connection_handler(void *arg) {
     // If a replica talks in this connection the information will be recorded.
     ReplicaConfig *replica = (ReplicaConfig *) malloc(sizeof(ReplicaConfig));
 
-    RequestParserBuffer buffer = buffered_reader(ctx->thread_allocator, client_fd);
+    RequestParserBuffer buffer = buffered_reader(ctx->scratch, client_fd);
 
     while (keep_alive) {
         buffer.total_read = 0;
-        Request request   = parse_request(ctx->thread_allocator, &buffer);
+        Request request   = parse_request(ctx->scratch, &buffer);
         DEBUG_PRINT_F("parsed request %d\n", request.type);
-        DEBUG_PRINT(buffer.total_read, lu);
         if (request.empty) {
             break;
         }
@@ -395,15 +396,14 @@ void *connection_handler(void *arg) {
             if (ctx->replicas != NULL) {
                 for (int i = 0; i < ctx->replicas->total; i++) {
                     ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
-                    if (replica_to_send->handskahe_done == 1) {
-                        printf("propagating command to replica %d\n", replica_to_send->port);
-                        // TODO: Do not use buf directly instead the buffer should keep the
-                        // whole request to send it to the replica. The buf might be overwritten
-                        // by the next request.
-                        send_response(replica_to_send->conn_fd, buffer.buffer);
-                    }
+                    printf("propagating command to replica %d\n", replica_to_send->port);
+                    // TODO: Do not use buf directly instead the buffer should keep the
+                    // whole request to send it to the replica. The buf might be overwritten
+                    // by the next request.
+                    send_response(replica_to_send->conn_fd, buffer.buffer);
                 }
             }
+            DEBUG_LOG("propagated");
             assert(resp_array->count >= 3);
             Request *key_val = resp_array->elts[1];
             Request *val_val = resp_array->elts[2];
@@ -425,19 +425,17 @@ void *connection_handler(void *arg) {
                 Request *ttl_val = resp_array->elts[4];
                 assert(ttl_val->type == BULK_STRING);
                 BulkString *ttl_str      = (BulkString *) ttl_val->val;
-                Arena      *scratch      = &(*ctx->thread_allocator);
+                Arena      *scratch      = &(*ctx->scratch);
                 long long   current_time = get_current_time();
                 ttl                      = current_time + atoi(s8_to_cstr(scratch, ttl_str->str));
             }
+            DEBUG_LOG("ttl set");
 
-            HashMapNode *hNode = hashmap_node_init();
-            strcpy(hNode->key, s8_to_cstr(ctx->thread_allocator, key->str));
-            strcpy(hNode->val, s8_to_cstr(ctx->thread_allocator, val->str));
-            hNode->ttl = ttl;
-            hashmap_insert(ctx->hashmap, hNode);
-
+            HashMapNode hNode = {.key = s8malloc(key->str), .val = s8malloc(val->str), .ttl = ttl};
+            hashmap_upsert_atomic(ctx->hashmap, ctx->perm, &hNode);
+            DEBUG_LOG("upserted message");
             send_response_bulk_string(ctx->conn_fd, S("OK"));
-        } else if (s8equals_nocase(command->str, S("KEYS")) == true) {
+        } else if (s8equals_nocase(command->str, S("keys")) == true) {
             assert(resp_array->count == 2);
             Request *pattern_val = resp_array->elts[1];
             assert(pattern_val->type == BULK_STRING);
@@ -448,13 +446,18 @@ void *connection_handler(void *arg) {
                 keep_alive = 0;
                 continue;
             }
-
-            char **keys = hashmap_keys(ctx->hashmap);
+            vector *keys = initialize_vec();
+            hashmap_keys(*ctx->hashmap, keys);
             if (keys == NULL) {
                 respond_null(ctx->conn_fd);
                 continue;
             }
-            send_response_array(ctx->conn_fd, keys, ctx->hashmap->size);
+#pragma clang diagnostic ignored "-Wvla"
+            char *key_chars[keys->total];
+            for (int i = 0; i < keys->total; i++) {
+                key_chars[i] = keys->items[i];
+            }
+            send_response_array(ctx->conn_fd, key_chars, keys->total);
         } else if (s8equals_nocase(command->str, S("CONFIG")) == true) {
             assert(resp_array->count == 3);
             Request *get_val = resp_array->elts[1];
@@ -471,13 +474,13 @@ void *connection_handler(void *arg) {
             assert(arg_val->type == BULK_STRING);
             BulkString *arg = (BulkString *) arg_val->val;
 
-            char *config_val = getConfig(ctx->config, s8_to_cstr(ctx->thread_allocator, arg->str));
+            char *config_val = getConfig(ctx->config, s8_to_cstr(ctx->scratch, arg->str));
             if (config_val == NULL) {
-                fprintf(stderr, "Unknown Config %s\n", s8_to_cstr(ctx->thread_allocator, arg->str));
+                fprintf(stderr, "Unknown Config %s\n", s8_to_cstr(ctx->scratch, arg->str));
                 continue;
             }
 
-            char *resps[2] = {s8_to_cstr(ctx->thread_allocator, arg->str), config_val};
+            char *resps[2] = {s8_to_cstr(ctx->scratch, arg->str), config_val};
             send_response_array(ctx->conn_fd, resps, 2);
         } else if (s8equals_nocase(command->str, S("INFO")) == true) {
             assert(resp_array->count == 2);
@@ -490,7 +493,7 @@ void *connection_handler(void *arg) {
                 UNREACHABLE();
             }
 
-            Arena *scratch    = &(*ctx->thread_allocator);
+            Arena *scratch    = &(*ctx->scratch);
             int    total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
             total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
             total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
@@ -516,14 +519,14 @@ void *connection_handler(void *arg) {
                 Request *port_val = resp_array->elts[2];
                 assert(port_val->type == BULK_STRING);
                 BulkString *port_str = (BulkString *) port_val->val;
-                replica->port        = atoi(s8_to_cstr(ctx->thread_allocator, port_str->str));
+                replica->port        = atoi(s8_to_cstr(ctx->scratch, port_str->str));
                 send_response(ctx->conn_fd, okMsg);
             } else if (s8equals_nocase(arg->str, S("capa"))) {
                 Request *capa_val = resp_array->elts[2];
                 assert(capa_val->type == BULK_STRING);
                 BulkString *capa = (BulkString *) capa_val->val;
                 if (!s8equals_nocase(capa->str, S("psync2"))) {
-                    printf("%s is not supported", s8_to_cstr(ctx->thread_allocator, capa->str));
+                    printf("%s is not supported", s8_to_cstr(ctx->scratch, capa->str));
                     UNREACHABLE();
                 }
                 send_response(ctx->conn_fd, okMsg);
@@ -550,7 +553,7 @@ void *connection_handler(void *arg) {
                 push_vec(ctx->replicas, replica);
 
                 // transfer rdb
-                Arena *scratch    = &(*ctx->thread_allocator);
+                Arena *scratch    = &(*ctx->scratch);
                 char  *rdbContent = new (scratch, byte, 1024);
                 char *hexString = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469"
                                   "732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0"
@@ -568,14 +571,13 @@ void *connection_handler(void *arg) {
         }
     }
     printf("quitting thread_id %lu\n", (unsigned long) pthread_self());
-    droparena(ctx->thread_allocator);
+    droparena(ctx->scratch);
     free(ctx);
     return NULL;
 }
 
 void *master_connection_handler(void *arg) {
     ReplicationContext *ctx = (ReplicationContext *) arg;
-    DEBUG_PRINT(ctx->thread_allocator, p);
 
     // Finish handshake
     char *psync[3] = {
@@ -586,21 +588,21 @@ void *master_connection_handler(void *arg) {
     send_response_array(ctx->master_conn, psync, 3);
 
     int                 repl_offset = 0;
-    RequestParserBuffer buffer      = buffered_reader(ctx->thread_allocator, ctx->master_conn);
+    RequestParserBuffer buffer      = buffered_reader(ctx->scratch, ctx->master_conn);
 
     DEBUG_LOG("waiting for FULL RESYNC");
-    parse_simple_string(ctx->thread_allocator, &buffer);
+    parse_simple_string(ctx->scratch, &buffer);
     ctx->handshake_done = 1;
 
     // Read initial RDB transfer from master
     DEBUG_LOG("Waiting for RDB From Master");
-    parse_initial_rdb_transfer(ctx->thread_allocator, &buffer);
+    parse_initial_rdb_transfer(ctx->scratch, &buffer);
     DEBUG_LOG("got RDB message");
 
     int keep_alive = 1;
     while (keep_alive) {
         buffer.total_read = 0;
-        Request request   = parse_request(ctx->thread_allocator, &buffer);
+        Request request   = parse_request(ctx->scratch, &buffer);
         DEBUG_PRINT_F("parsed request %d\n", request.type);
         DEBUG_PRINT(buffer.total_read, lu);
         if (request.empty) {
@@ -653,16 +655,13 @@ void *master_connection_handler(void *arg) {
                 Request *ttl_val = resp_array->elts[4];
                 assert(ttl_val->type == BULK_STRING);
                 BulkString *ttl_str      = (BulkString *) ttl_val->val;
-                Arena      *scratch      = &(*ctx->thread_allocator);
+                Arena      *scratch      = &(*ctx->scratch);
                 long long   current_time = get_current_time();
                 ttl                      = current_time + atoi(s8_to_cstr(scratch, ttl_str->str));
             }
 
-            HashMapNode *hNode = hashmap_node_init();
-            strcpy(hNode->key, s8_to_cstr(ctx->thread_allocator, key->str));
-            strcpy(hNode->val, s8_to_cstr(ctx->thread_allocator, val->str));
-            hNode->ttl = ttl;
-            hashmap_insert(ctx->hashmap, hNode);
+            HashMapNode hNode = {.key = s8malloc(key->str), .val = s8malloc(val->str), .ttl = ttl};
+            hashmap_upsert_atomic(ctx->hashmap, ctx->perm, &hNode);
         } else if (s8equals_nocase(command->str, S("REPLCONF")) == true) {
             assert(resp_array->count == 3);
             Request *arg_val = resp_array->elts[1];
@@ -677,7 +676,7 @@ void *master_connection_handler(void *arg) {
                 assert(resp_array->elts[2]->type == BULK_STRING);
                 s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
                 assert(s8equals_nocase(arg_2_value, S("*")));
-                char *offset_str = new (ctx->thread_allocator, char, 10);
+                char *offset_str = new (ctx->scratch, char, 10);
                 snprintf(offset_str, 10, "%d", repl_offset);
                 char *items[3] = {"REPLCONF", "ACK", offset_str};
                 send_response_array(ctx->master_conn, items, 3);
@@ -695,7 +694,7 @@ void *master_connection_handler(void *arg) {
                 UNREACHABLE();
             }
 
-            Arena *scratch    = &(*ctx->thread_allocator);
+            Arena *scratch    = &(*ctx->scratch);
             int    total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
             total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
             total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
@@ -720,7 +719,7 @@ void *master_connection_handler(void *arg) {
     }
 
     printf("quitting thread_id %lu\n", (unsigned long) pthread_self());
-    droparena(ctx->thread_allocator);
+    droparena(ctx->scratch);
     free(ctx);
     return NULL;
 }

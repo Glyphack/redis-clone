@@ -23,17 +23,19 @@ typedef struct {
 
 typedef struct {
     int conn_fd;
-    HashMap* hashmap;
+    HashMap** hashmap;
     Config* config;
-    Arena* thread_allocator;
+    Arena* scratch;
+    Arena* perm;
     vector* replicas;
 } Context;
 
 typedef struct {
     int master_conn;
-    HashMap* hashmap;
+    HashMap** hashmap;
     Config* config;
-    Arena* thread_allocator;
+    Arena* scratch;
+    Arena* perm;
     int handshake_done;
 } ReplicationContext;
 
