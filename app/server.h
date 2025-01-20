@@ -3,11 +3,13 @@
 
 #include "arena.h"
 #include "hashmap.h"
+#include "resp.h"
 #include "vec.h"
 #include <netinet/in.h>
 
 #define RESPONSE_ITEM_MAX_SIZE 1024
 #define MAX_PATH 1024
+#define MAX_CLIENTS 10
 
 static const char* pongMsg = "+PONG\r\n";
 static const char* okMsg = "+OK\r\n";
@@ -38,6 +40,10 @@ typedef struct {
     Arena* perm;
     int handshake_done;
 } ReplicationContext;
+
+typedef struct {
+    RequestParserBuffer reader;
+} ClientInfo;
 
 
 typedef struct {

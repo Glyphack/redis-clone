@@ -38,12 +38,11 @@ u8 getNextChar(RequestParserBuffer *buffer) {
         DEBUG_LOG("read everything from client");
         return '\0';
     }
-
-    DEBUG_PRINT_F("received request: %.*s\n", (int) bytes_received, buffer->buffer);
     if (bytes_received < 0) {
         perror("cannot read from client");
         return '\0';
     }
+    DEBUG_PRINT_F("received request: %.*s\n", (int) bytes_received, buffer->buffer);
     buffer->length = bytes_received;
     buffer->cursor = 0;
     return getNextChar(buffer);
@@ -156,51 +155,59 @@ SimpleString parse_simple_string(Arena *arena, RequestParserBuffer *buffer) {
 RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer) {
     RespArray array = {0};
     int       len   = read_len(buffer);
-    array.elts      = new (arena, Request *, len);
+    array.elts      = new (arena, Element *, len);
     array.count     = len;
     for (int i = 0; i < len; i++) {
-        Request *element = new (arena, Request, 1);
-        *element         = parse_request(arena, buffer);
+        Element *element = new (arena, Element, 1);
+        *element         = parse_element(arena, buffer);
         array.elts[i]    = element;
     }
     return array;
 }
 
-// TODO: Use scratch arena for request parsing.
 Request parse_request(Arena *arena, RequestParserBuffer *buffer) {
-    Request request = {0};
+    u8 c = getNextChar(buffer);
+    if (c == '\0') {
+        return (Request) {.empty = 1};
+    }
+    rewindChar(buffer);
+    return (Request) {.empty = 0, .element = parse_element(arena, buffer)};
+}
+
+// TODO: Use scratch arena for request parsing.
+Element parse_element(Arena *arena, RequestParserBuffer *buffer) {
+    Element element = {0};
     char    c       = getNextChar(buffer);
     if (c == '\0') {
-        request.empty = 1;
-        return request;
+        return element;
     }
 
     // Skip the initial part until you see something familiar
     while (c != '\0') {
         if (c == '*') {
-            request.val                = new (arena, RespArray);
-            *(RespArray *) request.val = parse_resp_array(arena, buffer);
-            request.type               = ARRAY;
-            return request;
+            element.val                = new (arena, RespArray);
+            *(RespArray *) element.val = parse_resp_array(arena, buffer);
+            element.type               = ARRAY;
+            return element;
         } else if (c == '$') {
-            request.val                 = new (arena, BulkString);
-            *(BulkString *) request.val = parse_bulk_string(arena, buffer);
-            request.type                = BULK_STRING;
-            return request;
+            element.val                 = new (arena, BulkString);
+            *(BulkString *) element.val = parse_bulk_string(arena, buffer);
+            element.type                = BULK_STRING;
+            return element;
         } else if (c == '+') {
             SimpleString  simple_str    = parse_simple_string(arena, buffer);
             SimpleString *simple_string = new (arena, SimpleString);
             simple_string->str          = simple_str.str;
-            request.val                 = simple_string;
-            request.type                = SIMPLE_STRING;
-            return request;
+            element.val                 = simple_string;
+            element.type                = SIMPLE_STRING;
+            return element;
         } else if (c == '-') {
             SimpleString simple_str = parse_simple_string(arena, buffer);
             SimpleError *simple_err = new (arena, SimpleError);
             simple_err->str         = simple_str.str;
-            request.val             = simple_err;
-            request.type            = SIMPLE_ERROR;
-            return request;
+            element.val             = simple_err;
+            element.type            = SIMPLE_ERROR;
+            return element;
         } else {
             // A character that we don't recognize
             DEBUG_PRINT(c, c);
@@ -208,8 +215,7 @@ Request parse_request(Arena *arena, RequestParserBuffer *buffer) {
         }
     }
 
-    request.error = 1;
-    return request;
+    return element;
 }
 
 void *send_response_bulk_string(int conn_fd, s8 str) {

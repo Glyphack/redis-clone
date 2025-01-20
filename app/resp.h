@@ -32,12 +32,16 @@ typedef struct {
 typedef struct {
     ReqType type;
     void* val;
+} Element;
+
+typedef struct {
+    Element element;
     int error;
     int empty;
 } Request;
 
 typedef struct {
-    Request** elts;
+    Element** elts;
     int count;
 } RespArray;
 
@@ -51,10 +55,12 @@ typedef struct {
     long total_read;
 } RequestParserBuffer;
 
+Request parse_request(Arena *arena, RequestParserBuffer *buffer);
+
 BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer);
 SimpleString parse_simple_string(Arena *arena, RequestParserBuffer *buffer);
 RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer);
-Request parse_request(Arena *arena, RequestParserBuffer *buffer);
+Element parse_element(Arena *arena, RequestParserBuffer *buffer);
 RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer);
 
 // Response functions
