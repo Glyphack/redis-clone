@@ -1,5 +1,5 @@
-#ifndef SERVER_H
-#define SERVER_H
+#ifndef USERS_SYSADMIN_PROGRAMMING_REDIS_CLONE_APP_SERVER_H
+#define USERS_SYSADMIN_PROGRAMMING_REDIS_CLONE_APP_SERVER_H
 
 #include "arena.h"
 #include "hashmap.h"
@@ -24,26 +24,44 @@ typedef struct {
 } Config;
 
 typedef struct {
-    int conn_fd;
     HashMap** hashmap;
     Config* config;
-    Arena* scratch;
     Arena* perm;
     vector* replicas;
-} Context;
+} ServerContext;
 
 typedef struct {
-    int master_conn;
+    int cursor;
+    int len;
+    s8  buffer;
+} BufferWriter;
+
+typedef struct {
+    int conn_fd;
+    Arena* perm;
+    HashMap** hashmap;
+    BufferReader reader;
+    int want_read;
+    int want_write;
+    int want_close;
+    // bytes to be written to the client
+    BufferWriter writer;
+} ClientContext;
+
+typedef struct {
+    int master_fd;
     HashMap** hashmap;
     Config* config;
-    Arena* scratch;
     Arena* perm;
     int handshake_done;
 } ReplicationContext;
 
 typedef struct {
-    RequestParserBuffer reader;
-} ClientInfo;
+    int count;
+    int size;
+    struct pollfd *poll_fds;
+    ClientContext *client_contexts;
+} Connections;
 
 
 typedef struct {

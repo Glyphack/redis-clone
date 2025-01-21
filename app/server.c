@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <poll.h>
@@ -25,10 +26,10 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-RequestParserBuffer buffered_reader(Arena *arena, int conn_fd) {
-    int                 capacity = 64 * 1024; // 64KB chunks
-    byte               *buf      = new (arena, byte, capacity);
-    RequestParserBuffer buffer   = (RequestParserBuffer) {
+BufferReader buffered_reader(Arena *arena, int conn_fd) {
+    int          capacity = 64 * 1024; // 64KB chunks
+    byte        *buf      = new (arena, byte, capacity);
+    BufferReader buffer   = (BufferReader) {
           .buffer     = buf,
           .cursor     = 0,
           .length     = 0,
@@ -37,6 +38,40 @@ RequestParserBuffer buffered_reader(Arena *arena, int conn_fd) {
           .total_read = 0,
     };
     return buffer;
+}
+
+void append_write_buff(BufferWriter *buffer, s8 *data) {
+    if (buffer->cursor + data->len > buffer->buffer.len) {
+        printf("Buffer full\n");
+        UNREACHABLE();
+    }
+    memcpy(buffer->buffer.data + buffer->len, data->data, data->len);
+    buffer->len += data->len;
+}
+
+int write_response(int fd, BufferWriter *writer) {
+    DEBUG_PRINT_F("Writing response: %.*s\n", writer->len, writer->buffer.data);
+    if (writer->cursor >= writer->len) {
+        return 0; // Finished
+    }
+    u8 *to_write  = writer->buffer.data + writer->cursor;
+    int write_len = writer->len - writer->cursor;
+    int written   = send(fd, to_write, write_len, 0);
+    if (written < 0) {
+        perror("send");
+        return -1;
+    }
+    writer->cursor += written;
+    if (writer->cursor == writer->len) {
+        writer->cursor = 0;
+        writer->len    = 0;
+        return 0; // Finished
+    }
+    return 1; // Not finished
+}
+
+static void fd_set_nb(int fd) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
 }
 
 long long get_current_time() {
@@ -137,7 +172,7 @@ int handshake(Config *config) {
     return master_fd;
 }
 
-void handle_request(Arena *arena, int conn_fd, Request request) {
+void handle_request(ServerContext *sv_context, ClientContext *c_context, Request request) {
     Element element = request.element;
     if (element.type != ARRAY) {
         printf("Request invalid\n");
@@ -161,34 +196,50 @@ void handle_request(Arena *arena, int conn_fd, Request request) {
         }
         DEBUG_LOG("responding to ping");
         if (arg.len == 0) {
-            send_response(conn_fd, pongMsg);
+            s8 response = (s8) {.data = (u8 *) pongMsg, .len = strlen(pongMsg)};
+            append_write_buff(&c_context->writer, &response);
+            c_context->want_read  = 0;
+            c_context->want_write = 1;
             return;
+        } else {
+            // Arg passed to echo
+            UNREACHABLE();
         }
-        send_response(conn_fd, s8_to_cstr(arena, arg));
     }
 }
 
 // Add a new file descriptor to the set
-void add_client(Arena *arena, struct pollfd *pfds[], ClientInfo *clients_info[], int newfd,
-                int *fd_count, int *fd_size) {
-    if (*fd_count == *fd_size) {
-        *fd_size *= 2;
-        *pfds         = realloc(*pfds, sizeof(**pfds) * (*fd_size));
-        *clients_info = realloc(*clients_info, sizeof(**clients_info) * (*fd_size));
+void add_client(Arena *arena, ServerContext *sv_context, Connections *connections, int newfd) {
+    if (connections->count == connections->size) {
+        UNREACHABLE();
     }
+    fd_set_nb(newfd);
 
-    (*pfds)[*fd_count].fd      = newfd;
-    (*pfds)[*fd_count].events  = POLLIN;
-    (*clients_info)[*fd_count] = (ClientInfo) {.reader = buffered_reader(arena, newfd)};
-
-    (*fd_count)++;
+    int event = POLLERR;
+    if (connections->count == 0) {
+        // For server fd we want to listen for incoming connections
+        event |= POLLIN;
+    }
+    connections->poll_fds[connections->count] =
+        (struct pollfd) {.fd = newfd, .events = event, .revents = 0};
+    connections->client_contexts[connections->count] = (ClientContext) {
+        .conn_fd    = newfd,
+        .perm       = arena,
+        .hashmap    = sv_context->hashmap,
+        .reader     = buffered_reader(arena, newfd),
+        .writer     = (BufferWriter) {.cursor = 0,
+                                      .buffer = (s8) {.data = new (arena, u8, 1024), .len = 1024}},
+        .want_read  = 1,
+        .want_write = 0,
+        .want_close = 0,
+    };
+    connections->count++;
 }
 
-// Remove an index from the set
-void del_from_pfds(ClientInfo clients_info[], struct pollfd pfds[], int i, int *fd_count) {
-    pfds[i]         = pfds[*fd_count - 1];
-    clients_info[i] = clients_info[*fd_count - 1];
-    (*fd_count)--;
+void del_connection(Connections *connections, int i) {
+    connections->poll_fds[i]        = connections->poll_fds[connections->count - 1];
+    connections->client_contexts[i] = connections->client_contexts[connections->count - 1];
+    connections->count--;
 }
 
 int main(int argc, char *argv[]) {
@@ -196,8 +247,7 @@ int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
-    Arena arena         = newarena(1000000 * 1024);
-    Arena hashmap_arena = newarena(1000000 * 1024);
+    Arena arena = newarena(1000000 * 1024);
 
     Config *config      = new (&arena, Config);
     config->dbfilename  = NULL;
@@ -315,17 +365,14 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
-        pthread_t replication_thread_id;
-        Arena    *thread_allocator  = new (&arena, Arena);
-        *thread_allocator           = newarena(10 * 1024 * 1024);
+        pthread_t           replication_thread_id;
         ReplicationContext *context = malloc(sizeof(ReplicationContext));
-        context->master_conn        = master_fd;
+        context->master_fd          = master_fd;
         context->hashmap            = &hashmap;
         context->config             = config;
-        context->scratch            = thread_allocator;
-        context->perm               = &hashmap_arena;
-        // if (pthread_create(&replication_thread_id, NULL, master_connection_handler, context) !=
-        // 0) {
+        context->perm               = &arena;
+        // if (pthread_create(&replication_thread_id, NULL, master_connection_handler,
+        // context) != 0) {
         //     perror("Could not create thread");
         //     return 1;
         // }
@@ -334,81 +381,111 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Waiting for a client to connect...\n");
-    client_addr_len = sizeof(client_addr);
 
-    vector        *replicas = initialize_vec();
-    int            client_fd;
-    int            client_count = 0;
-    int            client_size  = 5;
-    struct pollfd *clients      = malloc(sizeof *clients * client_size);
-    ClientInfo    *clients_info = malloc(sizeof *clients_info * client_size);
-    add_client(&arena, &clients, &clients_info, server_fd, &client_count, &client_size);
+    client_addr_len      = sizeof(client_addr);
+    vector     *replicas = initialize_vec();
+    Connections conns    = {
+           .poll_fds        = malloc(sizeof(struct pollfd) * 5),
+           .client_contexts = malloc(sizeof(ClientContext) * 5),
+           .count           = 0,
+           .size            = 5,
+    };
+    ServerContext sv_context = {
+        .hashmap  = &hashmap,
+        .config   = config,
+        .perm     = &arena,
+        .replicas = replicas,
+    };
+    add_client(&arena, &sv_context, &conns, server_fd);
 
     while (1) {
-        int poll_count = poll(clients, client_count, -1);
+        int poll_count = poll(conns.poll_fds, conns.count, -1);
 
+        if (poll_count < 0 && errno == EINTR) {
+            continue; // not an error
+        }
         if (poll_count == -1) {
             perror("poll");
             abort();
         }
-        for (int i = 0; i < client_count; i++) {
-            if (!(clients[i].revents & (POLLIN | POLLHUP))) {
-                continue;
+
+        for (int i = 1; i < conns.count; i++) {
+            uint32_t       ready = conns.poll_fds[i].revents;
+            ClientContext *conn  = &conns.client_contexts[i];
+            struct pollfd *pfd   = &conns.poll_fds[i];
+            if ((ready & POLLERR) || conn->want_close) {
+                DEBUG_PRINT_F("client %d removed", conn->conn_fd);
+                del_connection(&conns, i);
+            } else if (ready & POLLOUT) {
+                int result = write_response(pfd->fd, &conn->writer);
+                DEBUG_PRINT_F("write response result %d\n", result);
+                switch (result) {
+                case 0:
+                    conn->want_write = 0;
+                    conn->want_read  = 1;
+                    break;
+                case -1:
+                    conn->want_close = 1;
+                    break;
+                case 1:
+                    conn->want_write = 1;
+                    break;
+                }
+            } else if (ready & POLLIN) {
+                conn->reader.status = 1;
+                conn->reader.cursor = 0;
+                append_read_buf(&conn->reader);
+                if (conn->reader.status == 0 || conn->reader.status == -1) {
+                    conn->want_close = 1;
+                    continue;
+                }
+                Request request = try_parse_request(&arena, &conn->reader);
+                if (request.empty) {
+                    // TODO close when read is not returning
+                    conn->want_close = 1;
+                    continue;
+                }
+                // if read then reset the length
+                conn->reader.length = 0;
+                printf("read request from client %d\n", pfd->fd);
+                handle_request(&sv_context, conn, request);
             }
-            if (clients[i].fd == server_fd) {
-                client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
-                if (client_fd == -1) {
+        }
+
+        for (int i = 0; i < conns.count; i++) {
+            struct pollfd *pfd = &conns.poll_fds[i];
+            if (pfd->fd == server_fd && pfd->revents) {
+                int new_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+                if (new_fd == -1) {
                     perror("accept");
                     continue;
                 } else {
-                    add_client(&arena, &clients, &clients_info, client_fd, &client_count,
-                               &client_size);
-                    printf("Client connected\n");
+                    add_client(&arena, &sv_context, &conns, new_fd);
+                    printf("Client %d connected\n", new_fd);
                 }
                 continue;
             }
-
-            ClientInfo client_info = clients_info[i];
-            Request    request     = parse_request(&arena, &client_info.reader);
-            if (request.empty) {
-                printf("client disconnected\n");
-                del_from_pfds(clients_info, clients, i, &client_count);
-                continue;
+            ClientContext *conn = &conns.client_contexts[i];
+            pfd->events         = POLLERR;
+            if (conn->want_read) {
+                pfd->events |= POLLIN;
             }
-            printf("read request from client %d\n", clients[i].fd);
-            handle_request(&arena, clients[i].fd, request);
+            if (conn->want_write) {
+                pfd->events |= POLLOUT;
+            }
         }
     }
 
-    // while (client_fd) {
-    //     Arena *thread_allocator = new (&arena, Arena);
-    //     *thread_allocator       = newarena(10 * 1024 * 1024);
-    //     Context *context        = malloc(sizeof(Context));
-    //     context->conn_fd        = client_fd;
-    //     context->hashmap        = &hashmap;
-    //     context->config         = config;
-    //     context->replicas       = replicas;
-    //     context->scratch        = thread_allocator;
-    //     context->perm           = &hashmap_arena;
-    //     if (pthread_create(&thread_id, NULL, connection_handler, context) != 0) {
-    //         perror("Could not create thread");
-    //         return 1;
-    //     }
-    //     printf("connection handler thread created %lu\n", (unsigned long) thread_id);
-    //     client_fd = accept(server_fd, (struct sockaddr *) &client_addr,
-    //     &client_addr_len);
-    // }
     close(server_fd);
-
     return 0;
 }
 
-void handle_echo(Context *ctx, s8 arg) {
+void handle_echo(ClientContext *ctx, s8 arg) {
     DEBUG_LOG("responding to echo");
     send_response_bulk_string(ctx->conn_fd, arg);
 }
 
-void handle_get(Context *ctx, s8 key) {
+void handle_get(ClientContext *ctx, s8 key) {
     printf("responding to get\n");
     HashMapNode node = hashmap_get(*ctx->hashmap, key);
     if (node.key.len == 0) {
@@ -424,13 +501,13 @@ void handle_get(Context *ctx, s8 key) {
 }
 
 // TODO if msg is not empty reply back
-void handle_ping(Context *ctx, s8 msg) {
+void handle_ping(ClientContext *ctx, s8 msg) {
     DEBUG_LOG("responding to ping");
     if (msg.len == 0) {
         send_response(ctx->conn_fd, pongMsg);
         return;
     }
-    send_response(ctx->conn_fd, s8_to_cstr(ctx->scratch, msg));
+    send_response(ctx->conn_fd, s8_to_cstr(ctx->perm, msg));
 }
 
 // void *connection_handler(void *arg) {
@@ -489,8 +566,9 @@ void handle_ping(Context *ctx, s8 msg) {
 //             // Do not propagate from replicas
 //             if (ctx->replicas != NULL) {
 //                 for (int i = 0; i < ctx->replicas->total; i++) {
-//                     ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
-//                     printf("propagating command to replica %d\n", replica_to_send->port);
+//                     ReplicaConfig *replica_to_send = (ReplicaConfig *)
+//                     ctx->replicas->items[i]; printf("propagating command to replica %d\n",
+//                     replica_to_send->port);
 //                     // TODO: Do not use buf directly instead the buffer should keep the
 //                     // whole request to send it to the replica. The buf might be overwritten
 //                     // by the next request.

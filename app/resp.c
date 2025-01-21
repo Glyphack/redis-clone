@@ -8,14 +8,14 @@
 #include <string.h>
 #include <sys/socket.h>
 
-char getCurrChar(RequestParserBuffer *buffer) {
+char getCurrChar(BufferReader *buffer) {
     if (buffer->cursor < buffer->length) {
         return buffer->buffer[buffer->cursor];
     }
     return '\0';
 }
 
-char rewindChar(RequestParserBuffer *buffer) {
+char rewindChar(BufferReader *buffer) {
     if (buffer->cursor > 0) {
         buffer->cursor--;
         buffer->total_read--;
@@ -23,32 +23,46 @@ char rewindChar(RequestParserBuffer *buffer) {
     return buffer->buffer[buffer->cursor];
 }
 
-u8 getNextChar(RequestParserBuffer *buffer) {
-    if (buffer->cursor < buffer->length) {
-        char c = buffer->buffer[buffer->cursor];
-        buffer->cursor++;
-        buffer->total_read++;
-        return c;
+u8 getNextChar(BufferReader *buffer) {
+    if (buffer->cursor >= buffer->length) {
+        return '\0';
     }
-    long bytes_received;
+    char c = buffer->buffer[buffer->cursor];
+    buffer->cursor++;
+    buffer->total_read++;
+    return c;
+}
 
-    bytes_received = recv(buffer->client_fd, buffer->buffer, buffer->capacity, 0);
+void append_read_buf(BufferReader *buffer) {
+    if (buffer->length >= buffer->capacity) {
+        // Buffer full
+        UNREACHABLE();
+    }
+    long bytes_received = recv(buffer->client_fd, buffer->buffer + buffer->length,
+                               buffer->capacity - buffer->length, 0);
     if (bytes_received == 0) {
         // Indicate we did not get anything
+        // Somehow tell connection to close
         DEBUG_LOG("read everything from client");
-        return '\0';
+        buffer->status = 0;
+        return;
+    }
+    if (bytes_received < 0 && errno == EAGAIN) {
+        buffer->status = 1;
+        return;
     }
     if (bytes_received < 0) {
         perror("cannot read from client");
-        return '\0';
+        buffer->status = -1;
+        return;
     }
     DEBUG_PRINT_F("received request: %.*s\n", (int) bytes_received, buffer->buffer);
-    buffer->length = bytes_received;
-    buffer->cursor = 0;
-    return getNextChar(buffer);
+    buffer->length += bytes_received;
+    buffer->status = 1;
+    return;
 }
 
-int read_len(RequestParserBuffer *buffer) {
+int read_len(BufferReader *buffer) {
     char curr = getCurrChar(buffer), prev = 0;
     int  len = 0;
 
@@ -74,7 +88,7 @@ long min(long a, long b) {
     return a < b ? a : b;
 }
 
-RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer) {
+RdbMessage parse_initial_rdb_transfer(Arena *arena, BufferReader *buffer) {
     char curr = getNextChar(buffer);
     if (curr != '$') {
         printf("Expected $ but got %c\n", curr);
@@ -96,7 +110,7 @@ RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer)
     return (RdbMessage) {.raw = raw};
 }
 
-BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
+BulkString parse_bulk_string(Arena *arena, BufferReader *buffer) {
     long len = read_len(buffer);
     s8   str = (s8) {.len = len, .data = new (arena, u8, len)};
 
@@ -123,7 +137,7 @@ BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
 
 // Simple strings are encoded as a plus (+) character, followed by a string. The string mustn't
 // contain a CR (\r) or LF (\n) character and is terminated by CRLF (i.e., \r\n).
-SimpleString parse_simple_string(Arena *arena, RequestParserBuffer *buffer) {
+SimpleString parse_simple_string(Arena *arena, BufferReader *buffer) {
     char         prev;
     char         curr         = getNextChar(buffer);
     s8           str          = {0};
@@ -152,7 +166,7 @@ SimpleString parse_simple_string(Arena *arena, RequestParserBuffer *buffer) {
     UNREACHABLE();
 }
 
-RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer) {
+RespArray parse_resp_array(Arena *arena, BufferReader *buffer) {
     RespArray array = {0};
     int       len   = read_len(buffer);
     array.elts      = new (arena, Element *, len);
@@ -165,17 +179,17 @@ RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer) {
     return array;
 }
 
-Request parse_request(Arena *arena, RequestParserBuffer *buffer) {
-    u8 c = getNextChar(buffer);
-    if (c == '\0') {
-        return (Request) {.empty = 1};
+Request try_parse_request(Arena *arena, BufferReader *buffer) {
+    Element element = parse_element(arena, buffer);
+    int     empty   = 0;
+    if (element.error) {
+        empty = 1;
     }
-    rewindChar(buffer);
-    return (Request) {.empty = 0, .element = parse_element(arena, buffer)};
+    return (Request) {.empty = empty, .element = element};
 }
 
 // TODO: Use scratch arena for request parsing.
-Element parse_element(Arena *arena, RequestParserBuffer *buffer) {
+Element parse_element(Arena *arena, BufferReader *buffer) {
     Element element = {0};
     char    c       = getNextChar(buffer);
     if (c == '\0') {

@@ -32,12 +32,16 @@ typedef struct {
 typedef struct {
     ReqType type;
     void* val;
+    int error;
 } Element;
 
 typedef struct {
     Element element;
     int error;
     int empty;
+    // 0 everything read
+    // 1 there is an error
+    int status;
 } Request;
 
 typedef struct {
@@ -46,22 +50,23 @@ typedef struct {
 } RespArray;
 
 typedef struct {
+    int   client_fd;
     char *buffer;
     long   cursor;
     long   length;
     int   capacity;
-    int   client_fd;
     // total bytes read until the command is processed
     long total_read;
-} RequestParserBuffer;
+    int status;
+} BufferReader;
 
-Request parse_request(Arena *arena, RequestParserBuffer *buffer);
+Request try_parse_request(Arena *arena, BufferReader *buffer);
 
-BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer);
-SimpleString parse_simple_string(Arena *arena, RequestParserBuffer *buffer);
-RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer);
-Element parse_element(Arena *arena, RequestParserBuffer *buffer);
-RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer);
+BulkString parse_bulk_string(Arena *arena, BufferReader *buffer);
+SimpleString parse_simple_string(Arena *arena, BufferReader *buffer);
+RespArray parse_resp_array(Arena *arena, BufferReader *buffer);
+Element parse_element(Arena *arena, BufferReader *buffer);
+RdbMessage parse_initial_rdb_transfer(Arena *arena, BufferReader *buffer);
 
 // Response functions
 void *send_response_bulk_string(int conn_fd, s8 str);
@@ -69,4 +74,5 @@ void *respond_null(int client_fd);
 long send_response(int client_fd, const char *response);
 void send_response_array(int client_fd, char **items, int size);
 
+void append_read_buf(BufferReader *);
 #endif
