@@ -1,5 +1,5 @@
-#ifndef USERS_SYSADMIN_PROGRAMMING_REDIS_CLONE_APP_SERVER_H
-#define USERS_SYSADMIN_PROGRAMMING_REDIS_CLONE_APP_SERVER_H
+#ifndef SERVER_H
+#define SERVER_H
 
 #include "arena.h"
 #include "hashmap.h"
@@ -13,6 +13,12 @@
 
 static const char* pongMsg = "+PONG\r\n";
 static const char* okMsg = "+OK\r\n";
+
+typedef struct {
+    size cursor;
+    size len;
+    s8  buffer;
+} BufferWriter;
 
 typedef struct {
     char* dir;
@@ -31,25 +37,14 @@ typedef struct {
 } ServerContext;
 
 typedef struct {
-    int cursor;
-    int len;
-    s8  buffer;
-} BufferWriter;
-
-typedef struct {
+    int port;
+    int handskahe_done;
     int conn_fd;
-    Arena* perm;
-    HashMap** hashmap;
-    BufferReader reader;
-    int want_read;
-    int want_write;
-    int want_close;
-    // bytes to be written to the client
-    BufferWriter writer;
-} ClientContext;
+} ReplicaConfig;
 
 typedef struct {
     int master_fd;
+    int repl_offset;
     HashMap** hashmap;
     Config* config;
     Arena* perm;
@@ -57,18 +52,28 @@ typedef struct {
 } ReplicationContext;
 
 typedef struct {
+    int conn_fd;
+    Arena* perm;
+    Arena arena;
+    HashMap** hashmap;
+    BufferReader reader;
+    int want_read;
+    int want_write;
+    int want_close;
+    // bytes to be written to the client
+    BufferWriter writer;
+    // If a replica is talking in this connection
+    ReplicaConfig *replica;
+    // If this a connection to master for replication
+    ReplicationContext *replication_context;
+} ClientContext;
+
+typedef struct {
     int count;
     int size;
     struct pollfd *poll_fds;
     ClientContext *client_contexts;
 } Connections;
-
-
-typedef struct {
-    int port;
-    int handskahe_done;
-    int conn_fd;
-} ReplicaConfig;
 
 void* connection_handler(void* arg);
 void *master_connection_handler(void *arg);

@@ -41,17 +41,15 @@ void append_read_buf(BufferReader *buffer) {
     long bytes_received = recv(buffer->client_fd, buffer->buffer + buffer->length,
                                buffer->capacity - buffer->length, 0);
     if (bytes_received == 0) {
-        // Indicate we did not get anything
-        // Somehow tell connection to close
         DEBUG_LOG("read everything from client");
         buffer->status = 0;
         return;
     }
-    if (bytes_received < 0 && errno == EAGAIN) {
-        buffer->status = 1;
-        return;
-    }
     if (bytes_received < 0) {
+        if (errno == EAGAIN) {
+            buffer->status = 1;
+            return;
+        }
         perror("cannot read from client");
         buffer->status = -1;
         return;
@@ -179,6 +177,7 @@ RespArray parse_resp_array(Arena *arena, BufferReader *buffer) {
     return array;
 }
 
+// TODO return if parse failed quickly. Check paths and return as soon as it's not what expected.
 Request try_parse_request(Arena *arena, BufferReader *buffer) {
     Element element = parse_element(arena, buffer);
     int     empty   = 0;
@@ -232,24 +231,41 @@ Element parse_element(Arena *arena, BufferReader *buffer) {
     return element;
 }
 
-void *send_response_bulk_string(int conn_fd, s8 str) {
-    // 1 (for '$') + number of digits in str.len + 2 (\r\n) + str.len + 2 (\r\n) + 1 (null
-    // terminator)
+s8 serde_bulk_str(Arena *arena, s8 str) {
+    // 1 (for '$') + number of digits in str.len + 2 (\r\n) + str.len + 2 (\r\n)
     int num_len  = 1;
     int len_copy = (int) str.len;
     while (len_copy /= 10)
         num_len++;
-    int  response_len = 1 + num_len + 2 + (int) str.len + 2 + 1;
-    char response[response_len];
+    int len      = 1 + num_len + 2 + (int) str.len + 2;
+    s8  response = (s8) {.len = len, .data = new (arena, u8, len)};
 
-    snprintf(response, response_len, "$%zu\r\n%.*s\r\n", str.len, (int) str.len, str.data);
-    response[response_len - 1] = '\0';
-    DEBUG_PRINT_F("responding with `%s`", response);
-    long sent = send(conn_fd, response, response_len - 1, 0);
-    if (sent < 0) {
-        perror("Could not send response:");
+    int pos              = 0;
+    response.data[pos++] = '$';
+
+    char len_str[num_len];
+    int  len_pos  = 0;
+    int  temp_len = (int) str.len;
+    do {
+        len_str[len_pos++] = '0' + (temp_len % 10);
+        temp_len /= 10;
+    } while (temp_len > 0);
+    while (len_pos > 0) {
+        response.data[pos++] = len_str[--len_pos];
     }
-    return NULL;
+
+    response.data[pos++] = '\r';
+    response.data[pos++] = '\n';
+
+    memcpy(response.data + pos, str.data, str.len);
+    pos += str.len;
+
+    response.data[pos++] = '\r';
+    response.data[pos++] = '\n';
+
+    DEBUG_LOG("responding with");
+    s8print(response);
+    return response;
 }
 
 void *respond_null(int client_fd) {

@@ -42,6 +42,8 @@ typedef struct {
     // 0 everything read
     // 1 there is an error
     int status;
+    char* bytes;
+    int len;
 } Request;
 
 typedef struct {
@@ -69,7 +71,7 @@ Element parse_element(Arena *arena, BufferReader *buffer);
 RdbMessage parse_initial_rdb_transfer(Arena *arena, BufferReader *buffer);
 
 // Response functions
-void *send_response_bulk_string(int conn_fd, s8 str);
+s8 serde_bulk_str(Arena *arena, s8 str);
 void *respond_null(int client_fd);
 long send_response(int client_fd, const char *response);
 void send_response_array(int client_fd, char **items, int size);

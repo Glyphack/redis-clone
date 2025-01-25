@@ -14,7 +14,7 @@ void hashmap_upsert(HashMap **map, Arena *arena, HashMapNode *node) {
             (*map)->node.ttl = node->ttl;
             return;
         }
-        map = (HashMap **) &(*map)->children[h >> 62];
+        map = &(*map)->children[h >> 62];
     }
     *map             = new (arena, HashMap);
     (*map)->node.key = node->key;

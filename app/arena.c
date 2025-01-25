@@ -18,7 +18,7 @@ __attribute((malloc, alloc_align(3))) void *alloc(Arena *a, size sz, size align,
     size available = a->end - a->offset - padding;
     if (available < 0 || count > available / sz) {
         printf("Out of memory");
-        return 0;
+        abort();
     }
     void *p = a->offset + padding;
     a->offset += padding + count * sz;
