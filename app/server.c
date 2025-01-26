@@ -46,20 +46,24 @@ void append_write_buff(BufferWriter *writer, s8 *data) {
                data->len, writer->buffer.len);
         abort();
     }
-    memcpy(writer->buffer.data + writer->len, data->data, data->len);
     DEBUG_LOG("sending");
     s8print(*data);
+    memcpy(writer->buffer.data + writer->len, data->data, data->len);
     writer->len += data->len;
+}
+
+void write_response(ClientContext *c_context, s8 *response) {
+    append_write_buff(&c_context->writer, response);
 }
 
 int send_writes(int fd, BufferWriter *writer) {
     if (writer->cursor >= writer->len) {
         return 0; // Everything written
     }
-    u8  *to_write  = writer->buffer.data + writer->cursor;
-    size write_len = writer->len - writer->cursor;
-    size written   = send(fd, to_write, write_len, 0);
-    DEBUG_PRINT_F("Writing response: %.*s\n", (int) write_len, to_write);
+    u8  *to_write     = writer->buffer.data + writer->cursor;
+    size to_write_len = writer->len - writer->cursor;
+    DBG_F("Writing response to %d\n", fd);
+    size written = send(fd, to_write, to_write_len, 0);
     if (written < 0) {
         perror("send");
         return -1;
@@ -73,8 +77,40 @@ int send_writes(int fd, BufferWriter *writer) {
     return 1; // Not finished
 }
 
-static void fd_set_nb(int fd) {
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+int add_client(Arena *arena, ServerContext *sv_context, Connections *connections, int newfd) {
+    if (connections->count == connections->size) {
+        UNREACHABLE();
+    }
+    fcntl(newfd, F_SETFL, fcntl(newfd, F_GETFL, 0) | O_NONBLOCK);
+
+    short event = POLLERR;
+    int   id    = __atomic_fetch_add(&connections->count, 1, __ATOMIC_SEQ_CST);
+    if (id == 0) {
+        event |= POLLIN;
+    }
+    connections->poll_fds[id]        = (struct pollfd) {.fd = newfd, .events = event, .revents = 0};
+    connections->client_contexts[id] = (ClientContext) {
+        .conn_fd    = newfd,
+        .perm       = arena,
+        .hashmap    = sv_context->hashmap,
+        .reader     = buffered_reader(arena, newfd),
+        .writer     = (BufferWriter) {.cursor = 0,
+                                      .len    = 0,
+                                      .buffer = (s8) {.data = new (arena, u8, 1024), .len = 1024}},
+        .want_read  = 1,
+        .want_write = 0,
+        .want_close = 0,
+    };
+    connections->client_contexts[id].conn_id = id;
+    return id;
+}
+
+void del_connection(Connections *connections, int i) {
+    DBG_F("client %d removed\n", i);
+    connections->poll_fds[i]        = connections->poll_fds[connections->count - 1];
+    connections->client_contexts[i] = connections->client_contexts[connections->count - 1];
+    // ClientContext del_con           = connections->client_contexts[i];
+    connections->count--;
 }
 
 long long get_current_time() {
@@ -117,9 +153,12 @@ void *getConfig(Config *config, char *name) {
     return NULL;
 }
 
-void write_response(ClientContext *c_context, s8 *response) {
-    append_write_buff(&c_context->writer, response);
-}
+typedef struct {
+    ServerContext      *sv_context;
+    ClientContext      *client_context;
+    ReplicationContext *repl_context;
+    Connections        *conns;
+} HandshakeThreadData;
 
 int handshake(ServerContext *sv_context, ClientContext *ctx, Config *config) {
     // Initial handshake send a ping
@@ -128,6 +167,8 @@ int handshake(ServerContext *sv_context, ClientContext *ctx, Config *config) {
     s8     request;
     request = serde_array(sv_context->perm, ping, 1);
     write_response(ctx, &request);
+    send_writes(ctx->conn_fd, &ctx->writer);
+    append_read_buf(&ctx->reader);
 
     DEBUG_LOG("send print");
 
@@ -148,6 +189,8 @@ int handshake(ServerContext *sv_context, ClientContext *ctx, Config *config) {
     };
     request = serde_array(scratch, repl_conf1, 3);
     write_response(ctx, &request);
+    send_writes(ctx->conn_fd, &ctx->writer);
+    append_read_buf(&ctx->reader);
     DEBUG_LOG("send replconf 1");
 
     // Check we got ok
@@ -163,6 +206,8 @@ int handshake(ServerContext *sv_context, ClientContext *ctx, Config *config) {
     };
     request = serde_array(scratch, repl_conf2, 3);
     write_response(ctx, &request);
+    send_writes(ctx->conn_fd, &ctx->writer);
+    append_read_buf(&ctx->reader);
     DEBUG_LOG("send replconf 2");
 
     // check we got ok
@@ -179,16 +224,28 @@ int handshake(ServerContext *sv_context, ClientContext *ctx, Config *config) {
     };
     request = serde_array(scratch, psync, 3);
     write_response(ctx, &request);
-
-    DEBUG_LOG("send psync");
     send_writes(ctx->conn_fd, &ctx->writer);
     append_read_buf(&ctx->reader);
-    // currently discarding the handshake output
+    DEBUG_LOG("send psync");
+
+    // TODO:currently discarding the handshake output
     // RdbMessage initial_rdb = parse_initial_rdb_transfer(scratch, &ctx->reader);
     // DEBUG_LOG("initial RDB received");
     // s8print(initial_rdb.raw);
 
     return 0;
+}
+
+void *handshake_thread(void *arg) {
+    HandshakeThreadData *data = (HandshakeThreadData *) arg;
+    handshake(data->sv_context, data->client_context, data->sv_context->config);
+    int           i         = add_client(data->sv_context->perm, data->sv_context, data->conns,
+                                         data->client_context->conn_fd);
+    ClientContext c_context = data->conns->client_contexts[i];
+    c_context.replication_context = data->repl_context;
+    DBG_F("handshake thread completed master conn %d", i);
+    free(data);
+    return NULL;
 }
 
 void handle_get(ClientContext *ctx, s8 key) {
@@ -207,32 +264,26 @@ void handle_get(ClientContext *ctx, s8 key) {
     write_response(ctx, &response);
 }
 
-void handle_master_request(ServerContext *_, ClientContext *c_context, Request request) {
-    ReplicationContext *ctx = c_context->replication_context;
+void handle_master_request(ServerContext *sv_context, ClientContext *c_context, Request request) {
+    ClientContext *ctx = c_context;
 
     // TODO: do not use perm arena for short lived req/resp
-    Arena *scratch = ctx->perm;
+    Arena *scratch = c_context->perm;
 
     DEBUG_LOG("waiting for FULL RESYNC");
     if (request.element.type == SIMPLE_STRING) {
-        ctx->handshake_done = 1;
+        ctx->replication_context->handshake_done = 1;
         return;
     }
 
-    // Read initial RDB transfer from master
-    // TODO do it
-    // DEBUG_LOG("Waiting for RDB From Master");
-    // parse_initial_rdb_transfer(ctx->perm, &buffer);
-    // DEBUG_LOG("got RDB message");
-
     Element element = request.element;
-    DEBUG_PRINT_F("replication parsed request %d\n", element.type);
-    DEBUG_PRINT(c_context->reader.total_read, lu);
+    DBG_F("replication parsed request %d\n", element.type);
+    DBG(c_context->reader.total_read, lu);
 
     if (element.type == BULK_STRING || element.type == SIMPLE_ERROR) {
         return;
     } else if (element.type == SIMPLE_STRING) {
-        ctx->handshake_done = 1;
+        ctx->replication_context->handshake_done = 1;
         return;
     }
 
@@ -284,15 +335,16 @@ void handle_master_request(ServerContext *_, ClientContext *c_context, Request r
         if (s8equals_nocase(arg->str, S("GETACK"))) {
             // ["replconf", "getack", "*"]
             DEBUG_LOG("responding to replconf get ack");
-            DEBUG_PRINT(ctx->repl_offset, d);
+            DBG(ctx->replication_context->repl_offset, d);
             assert(resp_array->count == 3);
             assert(resp_array->elts[2]->type == BULK_STRING);
             s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
             assert(s8equals_nocase(arg_2_value, S("*")));
             char *offset_str = new (scratch, char, 10);
-            snprintf(offset_str, 10, "%d", ctx->repl_offset);
+            snprintf(offset_str, 10, "%d", ctx->replication_context->repl_offset);
             char *items[3] = {"REPLCONF", "ACK", offset_str};
-            serde_array(scratch, items, 3);
+            s8    resp     = serde_array(scratch, items, 3);
+            write_response(c_context, &resp);
         } else {
             UNREACHABLE();
         }
@@ -316,18 +368,19 @@ void handle_master_request(ServerContext *_, ClientContext *c_context, Request r
         int   offset   = 0;
 
         offset += sprintf(response + offset, "role:%s\n",
-                          ctx->config->master_info != NULL ? "slave" : "master");
-        offset += sprintf(response + offset, "master_replid:%s\n", ctx->config->master_replid);
+                          sv_context->config->master_info != NULL ? "slave" : "master");
         offset +=
-            sprintf(response + offset, "master_repl_offset:%d\n", ctx->config->master_repl_offset);
+            sprintf(response + offset, "master_replid:%s\n", sv_context->config->master_replid);
+        offset += sprintf(response + offset, "master_repl_offset:%d\n",
+                          sv_context->config->master_repl_offset);
 
         serde_bulk_str(ctx->perm, s8_from_cstr(scratch, response));
     } else {
         printf("Unknown request type\n");
     }
 
-    ctx->repl_offset += request.bytes.len;
-    DEBUG_PRINT(ctx->repl_offset, d);
+    ctx->replication_context->repl_offset += request.bytes.len;
+    DBG(ctx->replication_context->repl_offset, d);
 }
 
 void handle_request(ServerContext *sv_context, ClientContext *c_context, Request request) {
@@ -378,18 +431,17 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         handle_get(ctx, key->str);
     } else if (s8equals_nocase(command->str, S("SET")) == true) {
         // TODO: extract this to a function and perform on all write operations
-        // TODO: Do not propagate from replicas
         if (sv_context->replicas != NULL) {
-            // for (int i = 0; i < sv_context->replicas->total; i++) {
-            //     ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
-            //     printf("propagating command to replica %d\n", replica_to_send->port);
-            //     // TODO: Do not use buf directly instead the buffer should keep the
-            //     // whole request to send it to the replica. The buf might be overwritten
-            //     // by the next request.
-            //     send_response(replica_to_send->conn_fd, request.buffer);
-            // }
+            for (int i = 0; i < sv_context->replicas->total; i++) {
+                ReplicaConfig *replica_to_send = (ReplicaConfig *) sv_context->replicas->items[i];
+                printf("propagating command to replica %d\n", replica_to_send->port);
+                ClientContext *replica_context =
+                    &sv_context->connections->client_contexts[replica_to_send->conn_id];
+                write_response(replica_context, &request.bytes);
+                replica_context->want_write = 1;
+            }
+            DEBUG_LOG("propagated");
         }
-        DEBUG_LOG("propagated");
         assert(resp_array->count >= 3);
         Element *key_val = resp_array->elts[1];
         Element *val_val = resp_array->elts[2];
@@ -535,11 +587,12 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         if (s8equals_nocase(arg1->str, S("?")) && s8equals_nocase(arg2->str, S("-1"))) {
             char response[100];
             sprintf(response, "+FULLRESYNC %s 0\r\n", sv_context->config->master_replid);
-            s8 resp_s8 = (s8) {.len = 100, .data = (u8 *) response};
+            s8 resp_s8 = (s8) {.len = strlen(response), .data = (u8 *) response};
             write_response(c_context, &resp_s8);
 
             c_context->replica->handskahe_done = h_done;
             c_context->replica->conn_fd        = ctx->conn_fd;
+            c_context->replica->conn_id        = ctx->conn_id;
             push_vec(sv_context->replicas, c_context->replica);
 
             // transfer rdb
@@ -557,52 +610,12 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
             fprintf(stderr, "DEBUGPRINT[22]: server.c:550: len=%zu\n", len);
             s8 rdb_response = (s8) {.len = len, .data = (u8 *) result};
             write_response(c_context, &rdb_response);
-            printf("handshake with replica at %d done.\n", c_context->replica->port);
+            DBG_F("handshake with replica at %d done. conn id: %d\n", c_context->replica->port,
+                  c_context->conn_id);
         }
     } else {
         printf("Unknown request type\n");
     }
-}
-
-// Add a new file descriptor to the set
-int add_client(Arena *arena, ServerContext *sv_context, Connections *connections, int newfd,
-               int blocking) {
-    if (connections->count == connections->size) {
-        UNREACHABLE();
-    }
-    if (!blocking) {
-        fd_set_nb(newfd);
-    }
-
-    short event = POLLERR;
-    if (connections->count == 0) {
-        // For server fd we want to listen for incoming connections
-        event |= POLLIN;
-    }
-    connections->poll_fds[connections->count] =
-        (struct pollfd) {.fd = newfd, .events = event, .revents = 0};
-    connections->client_contexts[connections->count] = (ClientContext) {
-        .conn_fd    = newfd,
-        .perm       = arena,
-        .hashmap    = sv_context->hashmap,
-        .reader     = buffered_reader(arena, newfd),
-        .writer     = (BufferWriter) {.cursor = 0,
-                                      .len    = 0,
-                                      .buffer = (s8) {.data = new (arena, u8, 1024), .len = 1024}},
-        .want_read  = 1,
-        .want_write = 0,
-        .want_close = 0,
-    };
-    connections->count++;
-    return connections->count - 1;
-}
-
-void del_connection(Connections *connections, int i) {
-    DEBUG_PRINT_F("client %d removed\n", i);
-    connections->poll_fds[i]        = connections->poll_fds[connections->count - 1];
-    connections->client_contexts[i] = connections->client_contexts[connections->count - 1];
-    // ClientContext del_con           = connections->client_contexts[i];
-    connections->count--;
 }
 
 int main(int argc, char *argv[]) {
@@ -732,15 +745,16 @@ int main(int argc, char *argv[]) {
            .size            = 5,
     };
     ServerContext sv_context = {
-        .hashmap  = &hashmap,
-        .config   = config,
-        .perm     = &arena,
-        .replicas = replicas,
+        .hashmap     = &hashmap,
+        .config      = config,
+        .perm        = &arena,
+        .replicas    = replicas,
+        .connections = &conns,
     };
-    add_client(&arena, &sv_context, &conns, server_fd, 0);
+    add_client(&arena, &sv_context, &conns, server_fd);
 
     if (config->master_info != NULL) {
-        int master_conn_fd = 0;
+        int master_conn_fd;
         if ((master_conn_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
             printf("\n Socket creation error \n");
             return -1;
@@ -752,15 +766,35 @@ int main(int argc, char *argv[]) {
         }
 
         ReplicationContext *context = new (&arena, ReplicationContext);
-        context->master_fd          = master_conn_fd;
-        context->hashmap            = &hashmap;
-        context->config             = config;
-        context->perm               = &arena;
         context->repl_offset        = 0;
-        int           i             = add_client(&arena, &sv_context, &conns, master_conn_fd, 1);
-        ClientContext c_context     = conns.client_contexts[i];
-        handshake(&sv_context, &c_context, config);
-        DEBUG_LOG("handeshake completed with master");
+        context->handshake_done     = 0;
+
+        ClientContext c_context = (ClientContext) {
+            .conn_fd    = master_conn_fd,
+            .perm       = &arena,
+            .hashmap    = sv_context.hashmap,
+            .reader     = buffered_reader(&arena, master_conn_fd),
+            .writer     = (BufferWriter) {.cursor = 0,
+                                          .len    = 0,
+                                          .buffer = (s8) {.data = new (&arena, u8, 1024), .len = 1024}},
+            .want_read  = 1,
+            .want_write = 0,
+            .want_close = 0,
+        };
+
+        HandshakeThreadData *thread_data = malloc(sizeof(HandshakeThreadData));
+        thread_data->sv_context          = &sv_context;
+        thread_data->client_context      = &c_context;
+        thread_data->repl_context        = context;
+        thread_data->conns               = &conns;
+        pthread_t handshake_tid;
+        if (pthread_create(&handshake_tid, NULL, handshake_thread, thread_data) != 0) {
+            perror("Failed to create handshake thread");
+            free(thread_data);
+            return -1;
+        }
+        pthread_detach(handshake_tid);
+        // TODO: use longjmp after handshake is done
     }
 
     while (1) {
@@ -779,11 +813,11 @@ int main(int argc, char *argv[]) {
             ClientContext *conn  = &conns.client_contexts[i];
             struct pollfd *pfd   = &conns.poll_fds[i];
             if ((ready & POLLERR) || conn->want_close) {
-                DEBUG_PRINT_F("client %d removed\n", conn->conn_fd);
+                DBG_F("client %d removed\n", conn->conn_fd);
                 del_connection(&conns, i);
             } else if (ready & POLLOUT) {
                 int result = send_writes(pfd->fd, &conn->writer);
-                DEBUG_PRINT_F("write response result %d\n", result);
+                DBG_F("write response result %d\n", result);
                 switch (result) {
                 case -1:
                     conn->want_close = 1;
@@ -808,13 +842,7 @@ int main(int argc, char *argv[]) {
                 }
 
                 while (conn->reader.length > 0) {
-                    printf("buffer content: %.*s\n",
-                           (int) (conn->reader.length - conn->reader.cursor),
-                           conn->reader.buffer + conn->reader.cursor);
-                    printf("cursor %ld\n", conn->reader.cursor);
-                    printf("length %ld\n", conn->reader.length);
                     Request request = try_parse_request(&arena, &conn->reader);
-                    printf("%d", request.empty);
                     if (request.empty) {
                         break;
                     }
@@ -850,7 +878,7 @@ int main(int argc, char *argv[]) {
                     perror("accept");
                     continue;
                 } else {
-                    add_client(&arena, &sv_context, &conns, new_fd, 0);
+                    add_client(&arena, &sv_context, &conns, new_fd);
                     printf("Client %d connected\n", new_fd);
                 }
                 continue;

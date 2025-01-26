@@ -234,7 +234,7 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
                 } else {
                     value->type = AUX_TYPE_INT;
                     int result  = parse_integer_encoded_as_string(&p, special_format);
-                    DEBUG_PRINT(result, d);
+                    DBG(result, d);
                     value->value.int_value = result;
                 }
                 push_vec(rdbContent->metadata, value);

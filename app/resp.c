@@ -31,10 +31,8 @@ const char *resp_error_string(RespError err) {
     }
 }
 
-// Define the jump buffer
 jmp_buf resp_error_handler;
 
-// Helper function to raise parsing errors
 static void resp_error(RespError code) {
     longjmp(resp_error_handler, code);
 }
@@ -85,7 +83,8 @@ void append_read_buf(BufferReader *buffer) {
         buffer->status = -1;
         return;
     }
-    DEBUG_PRINT_F("received: %.*s\n", (int) bytes_received, buffer->buffer + buffer->length);
+    DEBUG_LOG("received:");
+    s8print((s8) {.len = bytes_received, .data = (u8 *) buffer->buffer + buffer->length});
     buffer->length += bytes_received;
     buffer->status = 1;
     return;
@@ -98,7 +97,6 @@ int read_len(BufferReader *buffer) {
     while (curr >= '0' && curr <= '9') {
         len = len * 10;
         len += curr - '0';
-        fprintf(stderr, "DEBUGPRINT[24]: resp.c:101: len=%d\n", len);
         curr = getNextChar(buffer);
     }
     // end of the length
@@ -111,7 +109,6 @@ int read_len(BufferReader *buffer) {
     }
 
     if (len <= 0) {
-        fprintf(stderr, "DEBUGPRINT[23]: resp.c:115: len=%d\n", len);
         resp_error(RESP_ERR_INVALID_LENGTH);
     }
 
@@ -179,6 +176,7 @@ SimpleString parse_simple_string(Arena *arena, BufferReader *buffer) {
 
     while (curr == '\n' && prev == '\r') {
         if (curr != '\0') {
+            // TODO:Can jump back when we have more data?
             resp_error(RESP_ERR_UNEXPECTED_EOF);
         }
         if (i > MAX_SIMPLE_STRING_SIZE) {
@@ -210,27 +208,24 @@ RespArray parse_resp_array(Arena *arena, BufferReader *buffer) {
     return array;
 }
 
-// TODO return if parse failed quickly. Check paths and return as soon as it's not what expected.
 Request try_parse_request(Arena *arena, BufferReader *buffer) {
-
-    RespError err = setjmp(resp_error_handler);
-    if (err) {
-        DEBUG_PRINT_F("RESP parsing error: %s\n", resp_error_string(err));
-        Request result = {0};
-        result.empty   = 1;
-        result.error   = 1;
-        buffer->cursor = 0;
-        return result;
-    }
-
     Request result       = {0};
     long    before_parse = buffer->cursor;
     s8      raw          = {0};
-    Element element      = parse_element(arena, buffer);
-    raw.len              = buffer->cursor - before_parse;
-    raw.data             = (u8 *) buffer->buffer + before_parse;
-    result.element       = element;
-    result.empty         = 0;
+
+    RespError err = setjmp(resp_error_handler);
+    if (err) {
+        DBG_F("RESP parsing error: %s", resp_error_string(err));
+        Request result = {.empty = 1};
+        buffer->cursor = 0;
+        return result;
+    }
+    Element element = parse_element(arena, buffer);
+    raw.len         = buffer->cursor - before_parse;
+    raw.data        = (u8 *) buffer->buffer + before_parse;
+    result.element  = element;
+    result.empty    = 0;
+    result.bytes    = raw;
     return result;
 }
 

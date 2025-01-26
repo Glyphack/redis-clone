@@ -132,5 +132,21 @@ s8 s8malloc(s8 str) {
 }
 
 void s8print(s8 str) {
-    printf("%.*s\n", (int) str.len, str.data);
+    putchar('\'');
+    for (size i = 0; i < str.len; i++) {
+        switch (str.data[i]) {
+        case '\r':
+            putchar('\\');
+            putchar('r');
+            break;
+        case '\n':
+            putchar('\\');
+            putchar('n');
+            break;
+        default:
+            putchar(str.data[i]);
+        }
+    }
+    putchar('\'');
+    putchar('\n');
 }

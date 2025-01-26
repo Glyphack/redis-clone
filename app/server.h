@@ -27,35 +27,27 @@ typedef struct {
     int master_repl_offset;
 } Config;
 
-typedef struct {
-    HashMap** hashmap;
-    Config* config;
-    Arena* perm;
-    vector* replicas;
-} ServerContext;
-
 typedef enum  {
     h_replconf,
     h_psync,
     h_done
 } handshake_state ;
+
 typedef struct {
+    int conn_id;
     int port;
     handshake_state handskahe_done;
     int conn_fd;
 } ReplicaConfig;
 
 typedef struct {
-    int master_fd;
     int repl_offset;
-    HashMap** hashmap;
-    Config* config;
-    Arena* perm;
     int handshake_done;
 } ReplicationContext;
 
 typedef struct {
     int conn_fd;
+    int conn_id;
     Arena* perm;
     HashMap** hashmap;
     int want_read;
@@ -65,9 +57,9 @@ typedef struct {
     BufferReader reader;
     // bytes to be written to the client
     BufferWriter writer;
-    // If a replica is talking in this connection
+    // If a replica is talking in this connection. Only master
     ReplicaConfig *replica;
-    // If this a connection to master for replication
+    // If this a connection to master for replication. Only replica
     ReplicationContext *replication_context;
 } ClientContext;
 
@@ -77,6 +69,14 @@ typedef struct {
     struct pollfd *poll_fds;
     ClientContext *client_contexts;
 } Connections;
+
+typedef struct {
+    Connections *connections;
+    HashMap** hashmap;
+    Config* config;
+    Arena* perm;
+    vector* replicas;
+} ServerContext;
 
 void* connection_handler(void* arg);
 void *master_connection_handler(void *arg);
