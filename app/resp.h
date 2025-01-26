@@ -1,10 +1,33 @@
 #ifndef RESP_H
 #define RESP_H
 #include "str.h"
+#include <setjmp.h>
 
 
 // Response size constant
 #define RESPONSE_ITEM_MAX_SIZE 1024
+
+static s8 null_resp = S("$-1\r\n");
+static s8 ok_resp = S("+OK\r\n");
+static s8 pong_resp = S("+PONG\r\n");
+
+// Error codes for RESP parsing
+typedef enum RespError {
+    RESP_OK = 0,                  // No error
+    RESP_ERR_INVALID_START,        // Invalid RESP type character (not *, $, +, -, :)
+    RESP_ERR_INVALID_LENGTH,      // Invalid length specification
+    RESP_ERR_ARRAY_LENGTH,        // Invalid array length
+    RESP_ERR_UNEXPECTED_EOF,      // Unexpected end of input
+    RESP_ERR_BUFFER_OVERFLOW,    // Buffer capacity exceeded
+    RESP_ERR_MALFORMED_STRING,   // Malformed string (e.g., missing CRLF)
+} RespError;
+
+// Global jump buffer for error handling
+extern jmp_buf resp_error_handler;
+
+// Get string representation of RESP error
+const char* resp_error_string(RespError err);
+extern jmp_buf resp_error_handler;
 
 typedef enum {
     BULK_STRING,
@@ -32,7 +55,6 @@ typedef struct {
 typedef struct {
     ReqType type;
     void* val;
-    int error;
 } Element;
 
 typedef struct {
@@ -42,8 +64,8 @@ typedef struct {
     // 0 everything read
     // 1 there is an error
     int status;
-    char* bytes;
-    int len;
+    // raw bytes of this request
+    s8 bytes;
 } Request;
 
 typedef struct {
@@ -70,11 +92,9 @@ RespArray parse_resp_array(Arena *arena, BufferReader *buffer);
 Element parse_element(Arena *arena, BufferReader *buffer);
 RdbMessage parse_initial_rdb_transfer(Arena *arena, BufferReader *buffer);
 
-// Response functions
+// Serde functions
 s8 serde_bulk_str(Arena *arena, s8 str);
-void *respond_null(int client_fd);
-long send_response(int client_fd, const char *response);
-void send_response_array(int client_fd, char **items, int size);
+s8 serde_array(Arena *arena, char **items, int item_len);
 
 void append_read_buf(BufferReader *);
 #endif

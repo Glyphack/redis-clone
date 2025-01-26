@@ -11,8 +11,6 @@
 #define MAX_PATH 1024
 #define MAX_CLIENTS 10
 
-static const char* pongMsg = "+PONG\r\n";
-static const char* okMsg = "+OK\r\n";
 
 typedef struct {
     size cursor;
@@ -36,9 +34,14 @@ typedef struct {
     vector* replicas;
 } ServerContext;
 
+typedef enum  {
+    h_replconf,
+    h_psync,
+    h_done
+} handshake_state ;
 typedef struct {
     int port;
-    int handskahe_done;
+    handshake_state handskahe_done;
     int conn_fd;
 } ReplicaConfig;
 
@@ -54,12 +57,12 @@ typedef struct {
 typedef struct {
     int conn_fd;
     Arena* perm;
-    Arena arena;
     HashMap** hashmap;
-    BufferReader reader;
     int want_read;
     int want_write;
     int want_close;
+    // bytes read from the client
+    BufferReader reader;
     // bytes to be written to the client
     BufferWriter writer;
     // If a replica is talking in this connection
@@ -77,5 +80,4 @@ typedef struct {
 
 void* connection_handler(void* arg);
 void *master_connection_handler(void *arg);
-void send_response_array(int client_fd, char** items, int size);
 #endif

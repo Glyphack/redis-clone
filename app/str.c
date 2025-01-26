@@ -5,6 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+s8 cstr_as_s8(const char *cstr) {
+    size len = strlen(cstr);
+    s8   str;
+    str.data = cstr;
+    str.len  = len;
+    return str;
+}
+
 s8 s8_from_cstr(Arena *arena, const char *cstr) {
     size len = strlen(cstr);
     s8   str;
