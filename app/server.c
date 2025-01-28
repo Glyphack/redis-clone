@@ -12,9 +12,10 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <pthread.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +23,96 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
+
+BufferReader buffered_reader(Arena *arena, int conn_fd) {
+    int          capacity = 64 * 1024; // 64KB chunks
+    byte        *buf      = new (arena, byte, capacity);
+    BufferReader buffer   = (BufferReader) {
+          .buffer     = buf,
+          .cursor     = 0,
+          .length     = 0,
+          .capacity   = capacity,
+          .client_fd  = conn_fd,
+          .total_read = 0,
+    };
+    return buffer;
+}
+
+void append_write_buff(BufferWriter *writer, s8 *data) {
+    if (writer->len + data->len > writer->buffer.len) {
+        printf("Buffer full: writer len %zu, data len %zu, buffer len %zu\n", writer->len,
+               data->len, writer->buffer.len);
+        abort();
+    }
+    DEBUG_LOG("sending");
+    s8print(*data);
+    memcpy(writer->buffer.data + writer->len, data->data, data->len);
+    writer->len += data->len;
+}
+
+void write_response(ClientContext *c_context, s8 *response) {
+    append_write_buff(&c_context->writer, response);
+}
+
+int send_writes(int fd, BufferWriter *writer) {
+    if (writer->cursor >= writer->len) {
+        return 0; // Everything written
+    }
+    u8  *to_write     = writer->buffer.data + writer->cursor;
+    size to_write_len = writer->len - writer->cursor;
+    DBG_F("Writing response to %d\n", fd);
+    size written = send(fd, to_write, to_write_len, 0);
+    if (written < 0) {
+        perror("send");
+        return -1;
+    }
+    writer->cursor += written;
+    if (writer->cursor == writer->len) {
+        writer->cursor = 0;
+        writer->len    = 0;
+        return 0; // Finished
+    }
+    return 1; // Not finished
+}
+
+int add_client(Arena *arena, ServerContext *sv_context, Connections *connections, int newfd) {
+    if (connections->count == connections->size) {
+        UNREACHABLE();
+    }
+    fcntl(newfd, F_SETFL, fcntl(newfd, F_GETFL, 0) | O_NONBLOCK);
+
+    short event = POLLERR;
+    int   id    = connections->count;
+    if (id == 0) {
+        event |= POLLIN;
+    }
+    connections->poll_fds[id]        = (struct pollfd) {.fd = newfd, .events = event, .revents = 0};
+    connections->client_contexts[id] = (ClientContext) {
+        .conn_fd    = newfd,
+        .perm       = arena,
+        .hashmap    = sv_context->hashmap,
+        .reader     = buffered_reader(arena, newfd),
+        .writer     = (BufferWriter) {.cursor = 0,
+                                      .len    = 0,
+                                      .buffer = (s8) {.data = new (arena, u8, 1024), .len = 1024}},
+        .want_read  = 1,
+        .want_write = 0,
+        .want_close = 0,
+    };
+    connections->client_contexts[id].conn_id = id;
+    connections->count++;
+    return id;
+}
+
+void del_connection(Connections *connections, int i) {
+    DBG_F("client %d removed\n", i);
+    connections->poll_fds[i]        = connections->poll_fds[connections->count - 1];
+    connections->client_contexts[i] = connections->client_contexts[connections->count - 1];
+    // ClientContext del_con           = connections->client_contexts[i];
+    connections->count--;
+}
 
 long long get_current_time() {
     struct timespec ts;
@@ -64,62 +154,410 @@ void *getConfig(Config *config, char *name) {
     return NULL;
 }
 
-int handshake(Config *config) {
-    int master_fd = 0;
+void handle_get(ClientContext *ctx, s8 key) {
+    printf("responding to get\n");
+    HashMapNode node = hashmap_get(*ctx->hashmap, key);
+    if (node.key.len == 0) {
+        write_response(ctx, &null_resp);
+        return;
+    }
+    if (node.ttl != -1 && node.ttl < get_current_time()) {
+        printf("item expired ttl: %lld \n", node.ttl);
+        write_response(ctx, &null_resp);
+        return;
+    }
+    s8 response = serde_bulk_str(&(*(ctx->perm)), node.val);
+    write_response(ctx, &response);
+}
 
-    // Create socket
-    if ((master_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        printf("\n Socket creation error \n");
-        return -1;
+void handle_master_request(ServerContext *sv_context, ClientContext *c_context, Request request) {
+    ClientContext *ctx = c_context;
+
+    // TODO: do not use perm arena for short lived req/resp
+    Arena  *scratch = c_context->perm;
+    Element element = request.element;
+
+    if (element.type == SIMPLE_STRING) {
+        SimpleString *res = ((SimpleString *) element.val);
+        if (s8equals_nocase(res->str, S("pong")) == true) {
+            DEBUG_LOG("handshake first");
+            char port[6];
+            sprintf(port, "%d", sv_context->config->port);
+            char *repl_conf1[3] = {
+                "REPLCONF",
+                "listening-port",
+                port,
+            };
+            s8 request = serde_array(scratch, repl_conf1, 3);
+            write_response(ctx, &request);
+            ctx->replication_context->handshake_state = h_replconf;
+        } else if (s8equals_nocase(res->str, S("ok")) == true) {
+            if (ctx->replication_context->handshake_state == h_replconf) {
+                char *repl_conf2[3] = {
+                    "REPLCONF",
+                    "capa",
+                    "psync2",
+                };
+                s8 request = serde_array(scratch, repl_conf2, 3);
+                write_response(ctx, &request);
+                ctx->replication_context->handshake_state = h_replconf_2;
+            } else if (ctx->replication_context->handshake_state == h_replconf_2) {
+                char *psync[3] = {
+                    "PSYNC",
+                    "?",
+                    "-1",
+                };
+                s8 request = serde_array(scratch, psync, 3);
+                write_response(ctx, &request);
+                ctx->replication_context->handshake_state = h_psync;
+            } else {
+                UNREACHABLE();
+            }
+        } else if (s8startswith(res->str, S("FULLRESYNC")) == true) {
+            DEBUG_LOG("got full resync");
+            ctx->replication_context->handshake_state = h_done;
+        }
+        return;
+    } else if (element.type == RDB_MSG) {
+        DEBUG_LOG("Got empty rdb");
+        return; // ignore rdb message
     }
 
-    // Connect to the server
-    if (connect(master_fd, (struct sockaddr *) config->master_info, sizeof(struct sockaddr_in)) <
-        0) {
-        printf("Connection Failed");
-        return -1;
+    DBG_F("replication parsed request %d\n", element.type);
+    DBG(c_context->reader.total_read, lu);
+
+    if (element.type == BULK_STRING || element.type == SIMPLE_ERROR) {
+        return;
+    } else if (element.type == SIMPLE_STRING) {
+        ctx->replication_context->handshake_state = 1;
+        return;
     }
 
-    // Initial handshake send a ping
-    char *ping[1] = {"PING"};
-    send_response_array(master_fd, ping, 1);
+    assert(element.type == ARRAY);
+    RespArray *resp_array = (RespArray *) element.val;
+    if (resp_array->count == 0) {
+        printf("Request invalid\n");
+        return;
+    }
+    Element *command_val = resp_array->elts[0];
+    assert(command_val->type == BULK_STRING);
+    BulkString *command = (BulkString *) command_val->val;
 
-    char    tmp_str[100];
-    ssize_t nbytes = recv(master_fd, tmp_str, sizeof tmp_str, 0);
-    if (nbytes <= 0)
-        exit(1);
-    assert(strncmp(tmp_str, pongMsg, nbytes) == 0);
+    if (s8equals_nocase(command->str, S("SET")) == true) {
+        assert(resp_array->count >= 3);
+        Element *key_val = resp_array->elts[1];
+        Element *val_val = resp_array->elts[2];
+        assert(key_val->type == BULK_STRING);
+        assert(val_val->type == BULK_STRING);
+        BulkString *key = (BulkString *) key_val->val;
+        BulkString *val = (BulkString *) val_val->val;
 
-    // Next send the REPLCONF
-    char port[6];
-    sprintf(port, "%d", config->port);
-    char *repl_conf1[3] = {
-        "REPLCONF",
-        "listening-port",
-        port,
-    };
-    send_response_array(master_fd, repl_conf1, 3);
+        long long ttl = -1;
+        if (resp_array->count > 3) {
+            Element *px_val = resp_array->elts[3];
+            assert(px_val->type == BULK_STRING);
+            BulkString *px = (BulkString *) px_val->val;
+            if (!s8equals_nocase(px->str, S("px"))) {
+                printf("unknown command arguments");
+                return;
+            }
+            Element *ttl_val = resp_array->elts[4];
+            assert(ttl_val->type == BULK_STRING);
+            BulkString *ttl_str      = (BulkString *) ttl_val->val;
+            long long   current_time = get_current_time();
+            ttl                      = current_time + atoi(s8_to_cstr(scratch, ttl_str->str));
+        }
 
-    nbytes = recv(master_fd, tmp_str, sizeof tmp_str, 0);
-    if (nbytes <= 0)
-        exit(1);
-    assert(strncmp(tmp_str, okMsg, nbytes) == 0);
+        HashMapNode hNode = {.key = s8malloc(key->str), .val = s8malloc(val->str), .ttl = ttl};
+        hashmap_upsert(ctx->hashmap, ctx->perm, &hNode);
+    } else if (s8equals_nocase(command->str, S("REPLCONF")) == true) {
+        assert(resp_array->count == 3);
+        Element *arg_val = resp_array->elts[1];
+        assert(arg_val->type == BULK_STRING);
+        BulkString *arg = (BulkString *) arg_val->val;
 
-    char *repl_conf2[3] = {
-        "REPLCONF",
-        "capa",
-        "psync2",
-    };
-    send_response_array(master_fd, repl_conf2, 3);
+        if (s8equals_nocase(arg->str, S("GETACK"))) {
+            // ["replconf", "getack", "*"]
+            DEBUG_LOG("responding to replconf get ack");
+            DBG(ctx->replication_context->repl_offset, d);
+            assert(resp_array->count == 3);
+            assert(resp_array->elts[2]->type == BULK_STRING);
+            s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
+            assert(s8equals_nocase(arg_2_value, S("*")));
+            char *offset_str = new (scratch, char, 10);
+            snprintf(offset_str, 10, "%d", ctx->replication_context->repl_offset);
+            char *items[3] = {"REPLCONF", "ACK", offset_str};
+            s8    resp     = serde_array(scratch, items, 3);
+            write_response(c_context, &resp);
+        }
+    } else if (s8equals_nocase(command->str, S("INFO")) == true) {
+        assert(resp_array->count == 2);
+        Element *section_val = resp_array->elts[1];
+        assert(section_val->type == BULK_STRING);
+        BulkString *section = (BulkString *) section_val->val;
 
-    nbytes = recv(master_fd, tmp_str, sizeof tmp_str, 0);
-    if (nbytes <= 0)
-        exit(1);
-    assert(strncmp(tmp_str, okMsg, nbytes) == 0);
+        if (!s8equals_nocase(section->str, S("replication"))) {
+            // no info other than replication supported
+            UNREACHABLE();
+        }
 
-    // Next send the PYSNC is sent in connection_handler
+        int total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
+        total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
+        total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
+        total_size += 1;                                      // null terminator
 
-    return master_fd;
+        char *response = new (scratch, byte, total_size);
+        int   offset   = 0;
+
+        offset += sprintf(response + offset, "role:%s\n",
+                          sv_context->config->master_info != NULL ? "slave" : "master");
+        offset +=
+            sprintf(response + offset, "master_replid:%s\n", sv_context->config->master_replid);
+        offset += sprintf(response + offset, "master_repl_offset:%d\n",
+                          sv_context->config->master_repl_offset);
+
+        serde_bulk_str(ctx->perm, s8_from_cstr(scratch, response));
+    } else {
+        printf("Unknown request type\n");
+    }
+
+    ctx->replication_context->repl_offset += request.bytes.len;
+    DBG(ctx->replication_context->repl_offset, d);
+}
+
+void handle_request(ServerContext *sv_context, ClientContext *c_context, Request request) {
+    Element element = request.element;
+    // TODO: do not use perm arena for short lived req/resp
+    Arena *scratch = c_context->perm;
+    if (element.type != ARRAY) {
+        printf("Request invalid\n");
+        return;
+    }
+    RespArray *resp_array = (RespArray *) element.val;
+    if (resp_array->count == 0) {
+        printf("Request invalid\n");
+        return;
+    }
+    Element *command_val = resp_array->elts[0];
+    assert(command_val->type == BULK_STRING);
+    BulkString    *command = (BulkString *) command_val->val;
+    ClientContext *ctx     = c_context;
+
+    if (s8equals_nocase(command->str, S("PING")) == true) {
+        DEBUG_LOG("responding to ping");
+        s8 arg = S("");
+        if (resp_array->count == 2) {
+            Element *arg_val = resp_array->elts[1];
+            assert(arg_val->type == BULK_STRING);
+            arg = ((BulkString *) arg_val->val)->str;
+        }
+        if (arg.len == 0) {
+            write_response(c_context, &pong_resp);
+        } else {
+            // Arg passed to echo
+            UNREACHABLE();
+        }
+    } else if (s8equals_nocase(command->str, S("ECHO")) == true) {
+        DEBUG_LOG("responding to echo");
+        assert(resp_array->count == 2);
+        Element *command_val = resp_array->elts[1];
+        assert(command_val->type == BULK_STRING);
+        BulkString *command  = (BulkString *) command_val->val;
+        s8          response = serde_bulk_str(scratch, command->str);
+        write_response(c_context, &response);
+    } else if (s8equals_nocase(command->str, S("GET")) == true) {
+        assert(resp_array->count == 2);
+        Element *command_val = resp_array->elts[1];
+        assert(command_val->type == BULK_STRING);
+        BulkString *key = (BulkString *) command_val->val;
+        handle_get(ctx, key->str);
+    } else if (s8equals_nocase(command->str, S("SET")) == true) {
+        // TODO: extract this to a function and perform on all write operations
+        if (sv_context->replicas->total != 0) {
+            for (int i = 0; i < sv_context->replicas->total; i++) {
+                ReplicaConfig *replica_to_send = (ReplicaConfig *) sv_context->replicas->items[i];
+                printf("propagating command to replica %d\n", replica_to_send->port);
+                ClientContext *replica_context =
+                    &sv_context->connections->client_contexts[replica_to_send->conn_id];
+                write_response(replica_context, &request.bytes);
+                replica_context->want_write = 1;
+            }
+            DEBUG_LOG("propagated");
+        }
+        assert(resp_array->count >= 3);
+        Element *key_val = resp_array->elts[1];
+        Element *val_val = resp_array->elts[2];
+        assert(key_val->type == BULK_STRING);
+        assert(val_val->type == BULK_STRING);
+        BulkString *key = (BulkString *) key_val->val;
+        BulkString *val = (BulkString *) val_val->val;
+
+        long long ttl = -1;
+        if (resp_array->count > 3) {
+            Element *px_val = resp_array->elts[3];
+            assert(px_val->type == BULK_STRING);
+            BulkString *px = (BulkString *) px_val->val;
+            if (!s8equals_nocase(px->str, S("px"))) {
+                printf("unknown command arguments");
+                return;
+            }
+            Element *ttl_val = resp_array->elts[4];
+            assert(ttl_val->type == BULK_STRING);
+            BulkString *ttl_str      = (BulkString *) ttl_val->val;
+            long long   current_time = get_current_time();
+            ttl                      = current_time + atoi(s8_to_cstr(scratch, ttl_str->str));
+        }
+        DEBUG_LOG("ttl set");
+
+        HashMapNode hNode = {.key = s8malloc(key->str), .val = s8malloc(val->str), .ttl = ttl};
+        DEBUG_LOG("upserted message");
+        hashmap_upsert(ctx->hashmap, ctx->perm, &hNode);
+        write_response(c_context, &ok_resp);
+    } else if (s8equals_nocase(command->str, S("keys")) == true) {
+        assert(resp_array->count == 2);
+        Element *pattern_val = resp_array->elts[1];
+        assert(pattern_val->type == BULK_STRING);
+        BulkString *pattern = (BulkString *) pattern_val->val;
+
+        if (!s8equals_nocase(pattern->str, S("*"))) {
+            printf("unrecognized pattern");
+            return;
+        }
+        vector *keys = initialize_vec();
+        hashmap_keys(*ctx->hashmap, keys);
+        if (keys->total == 0) {
+            write_response(c_context, &null_resp);
+            return;
+        }
+        char *key_chars[keys->total];
+        for (int i = 0; i < keys->total; i++) {
+            key_chars[i] = keys->items[i];
+        }
+        s8 response = serde_array(ctx->perm, key_chars, keys->total);
+        write_response(c_context, &response);
+    } else if (s8equals_nocase(command->str, S("CONFIG")) == true) {
+        assert(resp_array->count == 3);
+        Element *get_val = resp_array->elts[1];
+        assert(get_val->type == BULK_STRING);
+        BulkString *get = (BulkString *) get_val->val;
+
+        if (!s8equals_nocase(get->str, S("GET"))) {
+            printf("Unknown config argument\n");
+            return;
+        }
+
+        Element *arg_val = resp_array->elts[2];
+        assert(arg_val->type == BULK_STRING);
+        BulkString *arg = (BulkString *) arg_val->val;
+
+        char *config_val = getConfig(sv_context->config, s8_to_cstr(scratch, arg->str));
+        if (config_val == NULL) {
+            fprintf(stderr, "Unknown Config %s\n", s8_to_cstr(scratch, arg->str));
+            return;
+        }
+
+        char *resps[2] = {s8_to_cstr(scratch, arg->str), config_val};
+        s8    response = serde_array(scratch, resps, 2);
+        write_response(c_context, &response);
+    } else if (s8equals_nocase(command->str, S("INFO")) == true) {
+        assert(resp_array->count == 2);
+        Element *section_val = resp_array->elts[1];
+        assert(section_val->type == BULK_STRING);
+        BulkString *section = (BulkString *) section_val->val;
+
+        if (!s8equals_nocase(section->str, S("replication"))) {
+            // no info other than replication supported
+            UNREACHABLE();
+        }
+
+        int total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
+        total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
+        total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
+        total_size += 1;                                      // null terminator
+
+        char *content = new (scratch, byte, total_size);
+        int   offset  = 0;
+
+        offset += sprintf(content + offset, "role:%s\n",
+                          sv_context->config->master_info != NULL ? "slave" : "master");
+        offset +=
+            sprintf(content + offset, "master_replid:%s\n", sv_context->config->master_replid);
+        offset += sprintf(content + offset, "master_repl_offset:%d\n",
+                          sv_context->config->master_repl_offset);
+
+        s8 response = serde_bulk_str(&(*c_context->perm), s8_from_cstr(scratch, content));
+        write_response(c_context, &response);
+    } else if (s8equals_nocase(command->str, S("REPLCONF")) == true) {
+        assert(resp_array->count == 3);
+        Element *arg_val = resp_array->elts[1];
+        assert(arg_val->type == BULK_STRING);
+        BulkString *arg = (BulkString *) arg_val->val;
+        if (c_context->replica == NULL) {
+            c_context->replica = new (c_context->perm, ReplicaConfig);
+        }
+
+        if (s8equals_nocase(arg->str, S("listening-port"))) {
+            Element *port_val = resp_array->elts[2];
+            assert(port_val->type == BULK_STRING);
+            BulkString *port_str     = (BulkString *) port_val->val;
+            c_context->replica->port = atoi(s8_to_cstr(scratch, port_str->str));
+            write_response(c_context, &ok_resp);
+        } else if (s8equals_nocase(arg->str, S("capa"))) {
+            Element *capa_val = resp_array->elts[2];
+            assert(capa_val->type == BULK_STRING);
+            // port must be set before setting the capabilities
+            assert(c_context->replica->port != 0);
+            BulkString *capa = (BulkString *) capa_val->val;
+            if (!s8equals_nocase(capa->str, S("psync2"))) {
+                printf("%s is not supported", s8_to_cstr(scratch, capa->str));
+                UNREACHABLE();
+            }
+            write_response(c_context, &ok_resp);
+            c_context->replica->handskahe_done = h_psync;
+        } else {
+            UNREACHABLE();
+        }
+    } else if (s8equals_nocase(command->str, S("PSYNC")) == true) {
+        assert(resp_array->count == 3);
+        Element *arg1_val = resp_array->elts[1];
+        Element *arg2_val = resp_array->elts[2];
+        assert(arg1_val->type == BULK_STRING);
+        assert(arg2_val->type == BULK_STRING);
+        BulkString *arg1 = (BulkString *) arg1_val->val;
+        BulkString *arg2 = (BulkString *) arg2_val->val;
+
+        if (s8equals_nocase(arg1->str, S("?")) && s8equals_nocase(arg2->str, S("-1"))) {
+            char response[100];
+            sprintf(response, "+FULLRESYNC %s 0\r\n", sv_context->config->master_replid);
+            s8 resp_s8 = (s8) {.len = strlen(response), .data = (u8 *) response};
+            write_response(c_context, &resp_s8);
+
+            c_context->replica->handskahe_done = h_done;
+            c_context->replica->conn_fd        = ctx->conn_fd;
+            c_context->replica->conn_id        = ctx->conn_id;
+            push_vec(sv_context->replicas, c_context->replica);
+
+            // transfer rdb
+            char  *rdbContent = new (scratch, byte, 1024);
+            char  *hexString  = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469"
+                                "732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0"
+                                "c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
+            size_t len        = strlen(hexString);
+            for (size_t i = 0; i < len; i += 2) {
+                sscanf(hexString + i, "%2hhx", &rdbContent[i / 2]);
+            }
+            char *result = new (scratch, byte, 1024);
+            snprintf(result, 1024, "$%lu\r\n%s", strlen(rdbContent), rdbContent);
+            len = strlen(result);
+            fprintf(stderr, "DEBUGPRINT[22]: server.c:550: len=%zu\n", len);
+            s8 rdb_response = (s8) {.len = len, .data = (u8 *) result};
+            write_response(c_context, &rdb_response);
+            DBG_F("handshake with replica at %d done. conn id: %d\n", c_context->replica->port,
+                  c_context->conn_id);
+        }
+    } else {
+        printf("Unknown request type\n");
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -127,14 +565,15 @@ int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
-    Arena arena         = newarena(1000000 * 1024);
-    Arena hashmap_arena = newarena(1000000 * 1024);
+    Arena arena = newarena(10000 * 1024);
 
-    Config *config      = new (&arena, Config);
-    config->dbfilename  = NULL;
-    config->dir         = NULL;
-    config->port        = 6379;
-    config->master_info = NULL;
+    Config *config = new (&arena, Config);
+    *config        = (Config) {
+               .dbfilename  = NULL,
+               .dir         = NULL,
+               .port        = 6379,
+               .master_info = NULL,
+    };
 
     int print_rdb_and_exit = 0;
 
@@ -206,7 +645,11 @@ int main(int argc, char *argv[]) {
 
     int                server_fd;
     socklen_t          client_addr_len;
-    struct sockaddr_in client_addr;
+    struct sockaddr_in client_addr, serv_addr = {
+                                        .sin_family = AF_INET,
+                                        .sin_port   = htons(config->port),
+                                        .sin_addr   = {htonl(INADDR_ANY)},
+                                    };
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
@@ -223,503 +666,159 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    struct sockaddr_in serv_addr = {
-        .sin_family = AF_INET,
-        .sin_port   = htons(config->port),
-        .sin_addr   = {htonl(INADDR_ANY)},
-    };
-
     if (bind(server_fd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) != 0) {
         fprintf(stderr, "Bind failed: %s \n", strerror(errno));
         return 1;
     }
 
-    int connection_backlog = 5;
-    if (listen(server_fd, connection_backlog) != 0) {
+    if (listen(server_fd, 10) != 0) {
         fprintf(stderr, "Listen failed: %s \n", strerror(errno));
         return 1;
     }
 
-    if (config->master_info != NULL) {
-        int master_fd = handshake(config);
-        if (master_fd == -1) {
-            printf("handshake failed\n");
-            exit(1);
-        }
-
-        pthread_t replication_thread_id;
-        Arena    *thread_allocator  = new (&arena, Arena);
-        *thread_allocator           = newarena(10 * 1024 * 1024);
-        ReplicationContext *context = malloc(sizeof(ReplicationContext));
-        context->master_conn        = master_fd;
-        context->hashmap            = &hashmap;
-        context->config             = config;
-        context->scratch            = thread_allocator;
-        context->perm               = &hashmap_arena;
-        if (pthread_create(&replication_thread_id, NULL, master_connection_handler, context) != 0) {
-            perror("Could not create thread");
-            return 1;
-        }
-        printf("connection handler thread created for replication %lu\n",
-               (unsigned long) replication_thread_id);
-    }
-
     printf("Waiting for a client to connect...\n");
-    client_addr_len = sizeof(client_addr);
-    pthread_t thread_id;
 
-    vector *replicas = initialize_vec();
-
-    int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
-    while (client_fd) {
-        Arena *thread_allocator = new (&arena, Arena);
-        *thread_allocator       = newarena(10 * 1024 * 1024);
-        Context *context        = malloc(sizeof(Context));
-        context->conn_fd        = client_fd;
-        context->hashmap        = &hashmap;
-        context->config         = config;
-        context->replicas       = replicas;
-        context->scratch        = thread_allocator;
-        context->perm           = &hashmap_arena;
-        if (pthread_create(&thread_id, NULL, connection_handler, context) != 0) {
-            perror("Could not create thread");
-            return 1;
-        }
-        printf("connection handler thread created %lu\n", (unsigned long) thread_id);
-        client_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
-    }
-    printf("Client connected\n");
-
-    close(server_fd);
-
-    return 0;
-}
-
-void handle_echo(Context *ctx, s8 arg) {
-    DEBUG_LOG("responding to echo");
-    send_response_bulk_string(ctx->conn_fd, arg);
-}
-
-void handle_get(Context *ctx, s8 key) {
-    printf("responding to get\n");
-    HashMapNode node = hashmap_get(*ctx->hashmap, key);
-    if (node.key.len == 0) {
-        respond_null(ctx->conn_fd);
-        return;
-    }
-    if (node.ttl != -1 && node.ttl < get_current_time()) {
-        printf("item expired ttl: %lld \n", node.ttl);
-        respond_null(ctx->conn_fd);
-        return;
-    }
-    send_response_bulk_string(ctx->conn_fd, node.val);
-}
-
-// TODO if msg is not empty reply back
-void handle_ping(Context *ctx, s8 msg) {
-    DEBUG_LOG("responding to ping");
-    if (msg.len == 0) {
-        send_response(ctx->conn_fd, pongMsg);
-        return;
-    }
-    send_response(ctx->conn_fd, s8_to_cstr(ctx->scratch, msg));
-}
-
-RequestParserBuffer buffered_reader(Arena *arena, int conn_fd) {
-    int                 capacity = 64 * 1024; // 64KB chunks
-    byte               *buf      = new (arena, byte, capacity);
-    RequestParserBuffer buffer   = (RequestParserBuffer) {
-          .buffer     = buf,
-          .cursor     = 0,
-          .length     = 0,
-          .capacity   = capacity,
-          .client_fd  = conn_fd,
-          .total_read = 0,
+    client_addr_len      = sizeof(client_addr);
+    vector     *replicas = initialize_vec();
+    Connections conns    = {
+           .poll_fds        = malloc(sizeof(struct pollfd) * 5),
+           .client_contexts = malloc(sizeof(ClientContext) * 5),
+           .count           = 0,
+           .size            = 5,
     };
-    return buffer;
-}
+    ServerContext sv_context = {
+        .hashmap     = &hashmap,
+        .config      = config,
+        .perm        = &arena,
+        .replicas    = replicas,
+        .connections = &conns,
+    };
+    add_client(&arena, &sv_context, &conns, server_fd);
 
-void *connection_handler(void *arg) {
-    Context *ctx       = (Context *) arg;
-    int      client_fd = ctx->conn_fd;
-
-    int keep_alive = 1;
-
-    // If a replica talks in this connection the information will be recorded.
-    ReplicaConfig *replica = (ReplicaConfig *) malloc(sizeof(ReplicaConfig));
-
-    RequestParserBuffer buffer = buffered_reader(ctx->scratch, client_fd);
-
-    while (keep_alive) {
-        buffer.total_read = 0;
-        Request request   = parse_request(ctx->scratch, &buffer);
-        DEBUG_PRINT_F("parsed request %d\n", request.type);
-        if (request.empty) {
-            break;
+    if (config->master_info != NULL) {
+        int master_conn_fd;
+        if ((master_conn_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+            printf("\n Socket creation error \n");
+            return -1;
         }
-        if (request.error || request.type != ARRAY) {
-            printf("Request invalid\n");
+        if (connect(master_conn_fd, (struct sockaddr *) config->master_info,
+                    sizeof(struct sockaddr_in)) < 0) {
+            printf("Connection Failed");
+            return -1;
+        }
+
+        ReplicationContext *repl_context = new (&arena, ReplicationContext);
+        repl_context->repl_offset        = 0;
+        repl_context->handshake_state    = 0;
+        int            id                = add_client(&arena, &sv_context, &conns, master_conn_fd);
+        ClientContext *context           = &conns.client_contexts[id];
+        context->replication_context     = repl_context;
+        conns.poll_fds[id].events |= POLLOUT;
+        // write ping
+        char *ping[1] = {"PING"};
+        s8    request = serde_array(&arena, ping, 1);
+        write_response(context, &request);
+    }
+
+    while (1) {
+        int poll_count = poll(conns.poll_fds, conns.count, 1000);
+
+        if (poll_count < 0 && errno == EINTR) {
             continue;
         }
-        RespArray *resp_array = (RespArray *) request.val;
-        if (resp_array->count == 0) {
-            printf("Request invalid\n");
-            continue;
+        if (poll_count == -1) {
+            perror("poll");
+            abort();
         }
-        Request *command_val = resp_array->elts[0];
-        assert(command_val->type == BULK_STRING);
-        BulkString *command = (BulkString *) command_val->val;
 
-        if (s8equals_nocase(command->str, S("PING")) == true) {
-            s8 arg = S("");
-            if (resp_array->count == 2) {
-                Request *arg_val = resp_array->elts[1];
-                assert(arg_val->type == BULK_STRING);
-                arg = ((BulkString *) arg_val->val)->str;
-            }
-            handle_ping(ctx, arg);
-        } else if (s8equals_nocase(command->str, S("ECHO")) == true) {
-            assert(resp_array->count == 2);
-            Request *command_val = resp_array->elts[1];
-            assert(command_val->type == BULK_STRING);
-            BulkString *command = (BulkString *) command_val->val;
-            handle_echo(ctx, command->str);
-        } else if (s8equals_nocase(command->str, S("GET")) == true) {
-            assert(resp_array->count == 2);
-            Request *command_val = resp_array->elts[1];
-            assert(command_val->type == BULK_STRING);
-            BulkString *key = (BulkString *) command_val->val;
-            handle_get(ctx, key->str);
-        } else if (s8equals_nocase(command->str, S("SET")) == true) {
-            // TODO: extract this to a function and perform on all write operations
-            // Do not propagate from replicas
-            if (ctx->replicas != NULL) {
-                for (int i = 0; i < ctx->replicas->total; i++) {
-                    ReplicaConfig *replica_to_send = (ReplicaConfig *) ctx->replicas->items[i];
-                    printf("propagating command to replica %d\n", replica_to_send->port);
-                    // TODO: Do not use buf directly instead the buffer should keep the
-                    // whole request to send it to the replica. The buf might be overwritten
-                    // by the next request.
-                    send_response(replica_to_send->conn_fd, buffer.buffer);
-                }
-            }
-            DEBUG_LOG("propagated");
-            assert(resp_array->count >= 3);
-            Request *key_val = resp_array->elts[1];
-            Request *val_val = resp_array->elts[2];
-            assert(key_val->type == BULK_STRING);
-            assert(val_val->type == BULK_STRING);
-            BulkString *key = (BulkString *) key_val->val;
-            BulkString *val = (BulkString *) val_val->val;
-
-            long long ttl = -1;
-            if (resp_array->count > 3) {
-                Request *px_val = resp_array->elts[3];
-                assert(px_val->type == BULK_STRING);
-                BulkString *px = (BulkString *) px_val->val;
-                if (!s8equals_nocase(px->str, S("px"))) {
-                    printf("unknown command arguments");
-                    keep_alive = 0;
-                    continue;
-                }
-                Request *ttl_val = resp_array->elts[4];
-                assert(ttl_val->type == BULK_STRING);
-                BulkString *ttl_str      = (BulkString *) ttl_val->val;
-                Arena      *scratch      = &(*ctx->scratch);
-                long long   current_time = get_current_time();
-                ttl                      = current_time + atoi(s8_to_cstr(scratch, ttl_str->str));
-            }
-            DEBUG_LOG("ttl set");
-
-            HashMapNode hNode = {.key = s8malloc(key->str), .val = s8malloc(val->str), .ttl = ttl};
-            hashmap_upsert_atomic(ctx->hashmap, ctx->perm, &hNode);
-            DEBUG_LOG("upserted message");
-            send_response_bulk_string(ctx->conn_fd, S("OK"));
-        } else if (s8equals_nocase(command->str, S("keys")) == true) {
-            assert(resp_array->count == 2);
-            Request *pattern_val = resp_array->elts[1];
-            assert(pattern_val->type == BULK_STRING);
-            BulkString *pattern = (BulkString *) pattern_val->val;
-
-            if (!s8equals_nocase(pattern->str, S("*"))) {
-                printf("unrecognized pattern");
-                keep_alive = 0;
-                continue;
-            }
-            vector *keys = initialize_vec();
-            hashmap_keys(*ctx->hashmap, keys);
-            if (keys == NULL) {
-                respond_null(ctx->conn_fd);
-                continue;
-            }
-#pragma clang diagnostic ignored "-Wvla"
-            char *key_chars[keys->total];
-            for (int i = 0; i < keys->total; i++) {
-                key_chars[i] = keys->items[i];
-            }
-            send_response_array(ctx->conn_fd, key_chars, keys->total);
-        } else if (s8equals_nocase(command->str, S("CONFIG")) == true) {
-            assert(resp_array->count == 3);
-            Request *get_val = resp_array->elts[1];
-            assert(get_val->type == BULK_STRING);
-            BulkString *get = (BulkString *) get_val->val;
-
-            if (!s8equals_nocase(get->str, S("GET"))) {
-                printf("Unknown config argument\n");
-                keep_alive = 0;
-                continue;
-            }
-
-            Request *arg_val = resp_array->elts[2];
-            assert(arg_val->type == BULK_STRING);
-            BulkString *arg = (BulkString *) arg_val->val;
-
-            char *config_val = getConfig(ctx->config, s8_to_cstr(ctx->scratch, arg->str));
-            if (config_val == NULL) {
-                fprintf(stderr, "Unknown Config %s\n", s8_to_cstr(ctx->scratch, arg->str));
-                continue;
-            }
-
-            char *resps[2] = {s8_to_cstr(ctx->scratch, arg->str), config_val};
-            send_response_array(ctx->conn_fd, resps, 2);
-        } else if (s8equals_nocase(command->str, S("INFO")) == true) {
-            assert(resp_array->count == 2);
-            Request *section_val = resp_array->elts[1];
-            assert(section_val->type == BULK_STRING);
-            BulkString *section = (BulkString *) section_val->val;
-
-            if (!s8equals_nocase(section->str, S("replication"))) {
-                // no info other than replication supported
-                UNREACHABLE();
-            }
-
-            Arena *scratch    = &(*ctx->scratch);
-            int    total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
-            total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
-            total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
-            total_size += 1;                                      // null terminator
-
-            char *response = new (scratch, byte, total_size);
-            int   offset   = 0;
-
-            offset += sprintf(response + offset, "role:%s\n",
-                              ctx->config->master_info != NULL ? "slave" : "master");
-            offset += sprintf(response + offset, "master_replid:%s\n", ctx->config->master_replid);
-            offset += sprintf(response + offset, "master_repl_offset:%d\n",
-                              ctx->config->master_repl_offset);
-
-            send_response_bulk_string(ctx->conn_fd, s8_from_cstr(scratch, response));
-        } else if (s8equals_nocase(command->str, S("REPLCONF")) == true) {
-            assert(resp_array->count == 3);
-            Request *arg_val = resp_array->elts[1];
-            assert(arg_val->type == BULK_STRING);
-            BulkString *arg = (BulkString *) arg_val->val;
-
-            if (s8equals_nocase(arg->str, S("listening-port"))) {
-                Request *port_val = resp_array->elts[2];
-                assert(port_val->type == BULK_STRING);
-                BulkString *port_str = (BulkString *) port_val->val;
-                replica->port        = atoi(s8_to_cstr(ctx->scratch, port_str->str));
-                send_response(ctx->conn_fd, okMsg);
-            } else if (s8equals_nocase(arg->str, S("capa"))) {
-                Request *capa_val = resp_array->elts[2];
-                assert(capa_val->type == BULK_STRING);
-                BulkString *capa = (BulkString *) capa_val->val;
-                if (!s8equals_nocase(capa->str, S("psync2"))) {
-                    printf("%s is not supported", s8_to_cstr(ctx->scratch, capa->str));
+        for (int i = 1; i < conns.count; i++) {
+            uint32_t       ready = conns.poll_fds[i].revents;
+            ClientContext *conn  = &conns.client_contexts[i];
+            struct pollfd *pfd   = &conns.poll_fds[i];
+            if ((ready & POLLERR) || conn->want_close) {
+                DBG_F("client %d removed\n", conn->conn_fd);
+                del_connection(&conns, i);
+            } else if (ready & POLLOUT) {
+                int result = send_writes(pfd->fd, &conn->writer);
+                DBG_F("write response result %d\n", result);
+                switch (result) {
+                case -1:
+                    conn->want_close = 1;
+                    break;
+                case 0:
+                    conn->want_write = 0;
+                    conn->want_read  = 1;
+                    break;
+                case 1:
+                    conn->want_write = 1;
+                    break;
+                default:
                     UNREACHABLE();
                 }
-                send_response(ctx->conn_fd, okMsg);
-            } else {
-                UNREACHABLE();
-            }
-        } else if (s8equals_nocase(command->str, S("PSYNC")) == true) {
-            assert(resp_array->count == 3);
-            Request *arg1_val = resp_array->elts[1];
-            Request *arg2_val = resp_array->elts[2];
-            assert(arg1_val->type == BULK_STRING);
-            assert(arg2_val->type == BULK_STRING);
-            BulkString *arg1 = (BulkString *) arg1_val->val;
-            BulkString *arg2 = (BulkString *) arg2_val->val;
-
-            if (s8equals_nocase(arg1->str, S("?")) && s8equals_nocase(arg2->str, S("-1"))) {
-                char response[100];
-                sprintf(response, "+FULLRESYNC %s 0\r\n", ctx->config->master_replid);
-                send_response(ctx->conn_fd, response);
-
-                printf("handshake with replica at %d done.\n", replica->port);
-                replica->handskahe_done = 1;
-                replica->conn_fd        = ctx->conn_fd;
-                push_vec(ctx->replicas, replica);
-
-                // transfer rdb
-                Arena *scratch    = &(*ctx->scratch);
-                char  *rdbContent = new (scratch, byte, 1024);
-                char *hexString = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469"
-                                  "732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0"
-                                  "c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
-                size_t len      = strlen(hexString);
-                for (size_t i = 0; i < len; i += 2) {
-                    sscanf(hexString + i, "%2hhx", &rdbContent[i / 2]);
-                }
-                char *result = new (scratch, byte, 1024);
-                snprintf(result, 1024, "$%lu\r\n%s", strlen(rdbContent), rdbContent);
-                send_response(ctx->conn_fd, result);
-            }
-        } else {
-            printf("Unknown request type\n");
-        }
-    }
-    printf("quitting thread_id %lu\n", (unsigned long) pthread_self());
-    droparena(ctx->scratch);
-    free(ctx);
-    return NULL;
-}
-
-void *master_connection_handler(void *arg) {
-    ReplicationContext *ctx = (ReplicationContext *) arg;
-
-    // Finish handshake
-    char *psync[3] = {
-        "PSYNC",
-        "?",
-        "-1",
-    };
-    send_response_array(ctx->master_conn, psync, 3);
-
-    int                 repl_offset = 0;
-    RequestParserBuffer buffer      = buffered_reader(ctx->scratch, ctx->master_conn);
-
-    DEBUG_LOG("waiting for FULL RESYNC");
-    parse_simple_string(ctx->scratch, &buffer);
-    ctx->handshake_done = 1;
-
-    // Read initial RDB transfer from master
-    DEBUG_LOG("Waiting for RDB From Master");
-    parse_initial_rdb_transfer(ctx->scratch, &buffer);
-    DEBUG_LOG("got RDB message");
-
-    int keep_alive = 1;
-    while (keep_alive) {
-        buffer.total_read = 0;
-        Request request   = parse_request(ctx->scratch, &buffer);
-        DEBUG_PRINT_F("parsed request %d\n", request.type);
-        DEBUG_PRINT(buffer.total_read, lu);
-        if (request.empty) {
-            break;
-        }
-        if (request.error) {
-            printf("Request invalid\n");
-            continue;
-        }
-
-        // TODO: handle rdb file transfer
-        // for now ignore RDB
-        if (request.type == BULK_STRING || request.type == SIMPLE_ERROR) {
-            continue;
-        } else if (request.type == SIMPLE_STRING) {
-            ctx->handshake_done = 1;
-            continue;
-        }
-
-        assert(request.type == ARRAY);
-        RespArray *resp_array = (RespArray *) request.val;
-        if (resp_array->count == 0) {
-            printf("Request invalid\n");
-            continue;
-        }
-        Request *command_val = resp_array->elts[0];
-        assert(command_val->type == BULK_STRING);
-        BulkString *command = (BulkString *) command_val->val;
-        s8print(command->str);
-
-        if (s8equals_nocase(command->str, S("SET")) == true) {
-            assert(resp_array->count >= 3);
-            Request *key_val = resp_array->elts[1];
-            Request *val_val = resp_array->elts[2];
-            assert(key_val->type == BULK_STRING);
-            assert(val_val->type == BULK_STRING);
-            BulkString *key = (BulkString *) key_val->val;
-            BulkString *val = (BulkString *) val_val->val;
-
-            long long ttl = -1;
-            if (resp_array->count > 3) {
-                Request *px_val = resp_array->elts[3];
-                assert(px_val->type == BULK_STRING);
-                BulkString *px = (BulkString *) px_val->val;
-                if (!s8equals_nocase(px->str, S("px"))) {
-                    printf("unknown command arguments");
-                    keep_alive = 0;
+            } else if (ready & POLLIN) {
+                append_read_buf(&conn->reader);
+                switch (conn->reader.status) {
+                case 0:
+                case -1:
+                    conn->want_close = 1;
                     continue;
                 }
-                Request *ttl_val = resp_array->elts[4];
-                assert(ttl_val->type == BULK_STRING);
-                BulkString *ttl_str      = (BulkString *) ttl_val->val;
-                Arena      *scratch      = &(*ctx->scratch);
-                long long   current_time = get_current_time();
-                ttl                      = current_time + atoi(s8_to_cstr(scratch, ttl_str->str));
+
+                while (conn->reader.length > 0) {
+                    Request request = try_parse_request(&arena, &conn->reader);
+                    if (request.empty) {
+                        break;
+                    }
+                    printf("read request from client %d\n", pfd->fd);
+                    // if everything is read
+                    if (conn->reader.cursor == conn->reader.length) {
+                        conn->reader.cursor = 0;
+                        conn->reader.length = 0;
+                        conn->want_read     = 0;
+                        conn->want_write    = 1;
+                    }
+                    if (conn->replication_context) {
+                        handle_master_request(&sv_context, conn, request);
+                    } else {
+                        handle_request(&sv_context, conn, request);
+                    }
+                }
             }
-
-            HashMapNode hNode = {.key = s8malloc(key->str), .val = s8malloc(val->str), .ttl = ttl};
-            hashmap_upsert_atomic(ctx->hashmap, ctx->perm, &hNode);
-        } else if (s8equals_nocase(command->str, S("REPLCONF")) == true) {
-            assert(resp_array->count == 3);
-            Request *arg_val = resp_array->elts[1];
-            assert(arg_val->type == BULK_STRING);
-            BulkString *arg = (BulkString *) arg_val->val;
-
-            if (s8equals_nocase(arg->str, S("GETACK"))) {
-                // ["replconf", "getack", "*"]
-                DEBUG_LOG("responding to replconf get ack");
-                DEBUG_PRINT(repl_offset, d);
-                assert(resp_array->count == 3);
-                assert(resp_array->elts[2]->type == BULK_STRING);
-                s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
-                assert(s8equals_nocase(arg_2_value, S("*")));
-                char *offset_str = new (ctx->scratch, char, 10);
-                snprintf(offset_str, 10, "%d", repl_offset);
-                char *items[3] = {"REPLCONF", "ACK", offset_str};
-                send_response_array(ctx->master_conn, items, 3);
-            } else {
-                UNREACHABLE();
-            }
-        } else if (s8equals_nocase(command->str, S("INFO")) == true) {
-            assert(resp_array->count == 2);
-            Request *section_val = resp_array->elts[1];
-            assert(section_val->type == BULK_STRING);
-            BulkString *section = (BulkString *) section_val->val;
-
-            if (!s8equals_nocase(section->str, S("replication"))) {
-                // no info other than replication supported
-                UNREACHABLE();
-            }
-
-            Arena *scratch    = &(*ctx->scratch);
-            int    total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
-            total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
-            total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
-            total_size += 1;                                      // null terminator
-
-            char *response = new (scratch, byte, total_size);
-            int   offset   = 0;
-
-            offset += sprintf(response + offset, "role:%s\n",
-                              ctx->config->master_info != NULL ? "slave" : "master");
-            offset += sprintf(response + offset, "master_replid:%s\n", ctx->config->master_replid);
-            offset += sprintf(response + offset, "master_repl_offset:%d\n",
-                              ctx->config->master_repl_offset);
-
-            send_response_bulk_string(ctx->master_conn, s8_from_cstr(scratch, response));
-        } else {
-            printf("Unknown request type\n");
         }
 
-        repl_offset += buffer.total_read;
-        DEBUG_PRINT(repl_offset, d);
+        for (int i = 0; i < conns.count; i++) {
+            ClientContext *conn = &conns.client_contexts[i];
+            if (conn->want_close) {
+                del_connection(&conns, i);
+            }
+        }
+
+        for (int i = 0; i < conns.count; i++) {
+            struct pollfd *pfd = &conns.poll_fds[i];
+            if (pfd->fd == server_fd && pfd->revents) {
+                int new_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+                if (new_fd == -1) {
+                    perror("accept");
+                    continue;
+                } else {
+                    add_client(&arena, &sv_context, &conns, new_fd);
+                    printf("Client %d connected\n", new_fd);
+                }
+                continue;
+            }
+            ClientContext *conn = &conns.client_contexts[i];
+            pfd->events         = POLLERR;
+            if (conn->want_read) {
+                pfd->events |= POLLIN;
+            }
+            if (conn->want_write) {
+                pfd->events |= POLLOUT;
+            }
+        }
     }
 
-    printf("quitting thread_id %lu\n", (unsigned long) pthread_self());
-    droparena(ctx->scratch);
-    free(ctx);
-    return NULL;
+    for (int i = 0; i < conns.count; i++) {
+        close(conns.poll_fds[i].fd);
+    }
+    return 0;
 }

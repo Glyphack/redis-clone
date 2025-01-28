@@ -5,6 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+s8 cstr_as_s8(const char *cstr) {
+    size len = strlen(cstr);
+    s8   str;
+    str.data = cstr;
+    str.len  = len;
+    return str;
+}
+
 s8 s8_from_cstr(Arena *arena, const char *cstr) {
     size len = strlen(cstr);
     s8   str;
@@ -58,6 +66,14 @@ b32 s8equals_nocase(s8 a, s8 b) {
     }
 
     return 1;
+}
+
+// returns true if s8 starts with another s8
+b32 s8startswith(s8 str, s8 prefix) {
+    if (prefix.len > str.len) {
+        return false;
+    }
+    return memcmp(str.data, prefix.data, prefix.len) == 0;
 }
 
 // Compares two strings lexicographically
@@ -124,5 +140,21 @@ s8 s8malloc(s8 str) {
 }
 
 void s8print(s8 str) {
-    printf("%.*s\n", (int) str.len, str.data);
+    putchar('\'');
+    for (size i = 0; i < str.len; i++) {
+        switch (str.data[i]) {
+        case '\r':
+            putchar('\\');
+            putchar('r');
+            break;
+        case '\n':
+            putchar('\\');
+            putchar('n');
+            break;
+        default:
+            putchar(str.data[i]);
+        }
+    }
+    putchar('\'');
+    putchar('\n');
 }

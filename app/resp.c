@@ -4,70 +4,113 @@
 #include "str.h"
 #include <assert.h>
 #include <errno.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 
-char getCurrChar(RequestParserBuffer *buffer) {
+// Error string lookup function
+const char *resp_error_string(RespError err) {
+    switch (err) {
+    case RESP_OK:
+        return "RESP_OK";
+    case RESP_ERR_INVALID_START:
+        return "RESP_ERR_INVALID_START";
+    case RESP_ERR_INVALID_LENGTH:
+        return "RESP_ERR_INVALID_LENGTH";
+    case RESP_ERR_ARRAY_LENGTH:
+        return "RESP_ERR_ARRAY_LENGTH";
+    case RESP_ERR_UNEXPECTED_EOF:
+        return "RESP_ERR_UNEXPECTED_EOF";
+    case RESP_ERR_BUFFER_OVERFLOW:
+        return "RESP_ERR_BUFFER_OVERFLOW";
+    case RESP_ERR_MALFORMED_STRING:
+        return "RESP_ERR_MALFORMED_STRING";
+    default:
+        return "UNKNOWN_ERROR";
+    }
+}
+
+jmp_buf resp_error_handler;
+
+static void resp_error(RespError code) {
+    longjmp(resp_error_handler, code);
+}
+
+char getCurrChar(BufferReader *buffer) {
     if (buffer->cursor < buffer->length) {
         return buffer->buffer[buffer->cursor];
     }
     return '\0';
 }
 
-char rewindChar(RequestParserBuffer *buffer) {
-    if (buffer->cursor > 0) {
-        buffer->cursor--;
-        buffer->total_read--;
+u8 getNextChar(BufferReader *buffer) {
+    if (buffer->cursor >= buffer->length) {
+        return '\0';
     }
-    return buffer->buffer[buffer->cursor];
+    char c = buffer->buffer[buffer->cursor];
+    buffer->cursor++;
+    buffer->total_read++;
+    return c;
 }
 
-u8 getNextChar(RequestParserBuffer *buffer) {
-    if (buffer->cursor < buffer->length) {
-        char c = buffer->buffer[buffer->cursor];
-        buffer->cursor++;
-        buffer->total_read++;
-        return c;
-    }
-    long bytes_received;
+u8 peekChar(BufferReader *buffer) {
+    int cursor     = buffer->cursor;
+    u8  curr       = getNextChar(buffer);
+    buffer->cursor = cursor;
+    return curr;
+}
 
-    bytes_received = recv(buffer->client_fd, buffer->buffer, buffer->capacity, 0);
+void append_read_buf(BufferReader *buffer) {
+    if (buffer->length >= buffer->capacity) {
+        printf("read buffer full\n");
+        abort();
+    }
+    long bytes_received = recv(buffer->client_fd, buffer->buffer + buffer->length,
+                               buffer->capacity - buffer->length, 0);
     if (bytes_received == 0) {
-        // Indicate we did not get anything
         DEBUG_LOG("read everything from client");
-        return '\0';
+        buffer->status = 0;
+        return;
     }
-
-    DEBUG_PRINT_F("received request: %.*s\n", (int) bytes_received, buffer->buffer);
     if (bytes_received < 0) {
+        if (errno == EAGAIN) {
+            buffer->status = 1;
+            return;
+        }
         perror("cannot read from client");
-        return '\0';
+        buffer->status = -1;
+        return;
     }
-    buffer->length = bytes_received;
-    buffer->cursor = 0;
-    return getNextChar(buffer);
+    DBG_F("received from %d:", buffer->client_fd);
+    s8print((s8) {.len = bytes_received, .data = (u8 *) buffer->buffer + buffer->length});
+    buffer->length += bytes_received;
+    buffer->status = 1;
+    return;
 }
 
-int read_len(RequestParserBuffer *buffer) {
-    char curr = getCurrChar(buffer), prev = 0;
-    int  len = 0;
+int read_len(BufferReader *buffer) {
+    char curr = getNextChar(buffer);
+    int  len  = 0;
 
-    while (curr != '\0') {
+    while (curr >= '0' && curr <= '9') {
+        len = len * 10;
+        len += curr - '0';
         curr = getNextChar(buffer);
-        // end of the length
-        if (curr == '\n' && prev == '\r') {
-            break;
-        }
-        if (curr != '\r') {
-            // assert curr is a digit
-            assert_with_print(curr >= '0' && curr <= '9', "%c", curr);
-            len = len * 10;
-            len += curr - '0';
-        }
-        prev = curr;
     }
-    assert(len >= 0);
+    // end of the length
+    if (curr == '\0') {
+        resp_error(RESP_ERR_UNEXPECTED_EOF);
+    }
+    char next = getNextChar(buffer);
+    if (curr != '\r' && next != '\n') {
+        resp_error(RESP_ERR_INVALID_LENGTH);
+    }
+
+    if (len <= 0) {
+        resp_error(RESP_ERR_INVALID_LENGTH);
+    }
+
     return len;
 }
 
@@ -75,10 +118,10 @@ long min(long a, long b) {
     return a < b ? a : b;
 }
 
-RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer) {
+RdbMessage parse_initial_rdb_transfer(Arena *arena, BufferReader *buffer) {
     char curr = getNextChar(buffer);
     if (curr != '$') {
-        printf("Expected $ but got %c\n", curr);
+        resp_error(RESP_ERR_MALFORMED_STRING);
     }
     long len = read_len(buffer);
     s8   raw = (s8) {.len = len, .data = new (arena, u8, len)};
@@ -97,7 +140,7 @@ RdbMessage parse_initial_rdb_transfer(Arena *arena, RequestParserBuffer *buffer)
     return (RdbMessage) {.raw = raw};
 }
 
-BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
+BulkString parse_bulk_string(Arena *arena, BufferReader *buffer) {
     long len = read_len(buffer);
     s8   str = (s8) {.len = len, .data = new (arena, u8, len)};
 
@@ -106,164 +149,178 @@ BulkString parse_bulk_string(Arena *arena, RequestParserBuffer *buffer) {
     buffer->cursor += len_to_copy;
     buffer->total_read += len_to_copy;
     len_to_copy = len - len_to_copy;
-    if (len_to_copy > 0) {
-        for (int i = 0; i < len_to_copy; i++) {
-            str.data[i] = getNextChar(buffer);
+    for (int i = 0; i < len_to_copy; i++) {
+        str.data[i] = getNextChar(buffer);
+    }
+
+    int is_rdb = 1;
+    if (peekChar(buffer) == '\r') {
+        getNextChar(buffer);
+        if (peekChar(buffer) == '\n') {
+            is_rdb = 0;
+            getNextChar(buffer);
         }
     }
-
-    if (getNextChar(buffer) == '\r') {
-        assert(getNextChar(buffer) == '\n');
-    } else {
-        // TODO: RDB files don't have this
-        rewindChar(buffer);
-    }
-
-    return (BulkString) {.str = str};
+    return (BulkString) {.str = str, .is_rdb = is_rdb};
 }
 
 // Simple strings are encoded as a plus (+) character, followed by a string. The string mustn't
 // contain a CR (\r) or LF (\n) character and is terminated by CRLF (i.e., \r\n).
-SimpleString parse_simple_string(Arena *arena, RequestParserBuffer *buffer) {
-    char         prev;
-    char         curr         = getNextChar(buffer);
-    s8           str          = {0};
-    SimpleString simpleString = {0};
+SimpleString parse_simple_string(Arena *arena, BufferReader *buffer) {
+    char curr = getNextChar(buffer);
+    char prev = curr;
     // TODO: simple strings have no length. We max it to 50 here.
     int MAX_SIMPLE_STRING_SIZE = 1024;
-    str.data                   = new (arena, u8, MAX_SIMPLE_STRING_SIZE);
+    s8  str                    = {.data = new (arena, u8, MAX_SIMPLE_STRING_SIZE), .len = 0};
     int i                      = 0;
 
-    while (curr != '\0') {
-        if (curr == '\n' && prev == '\r') {
-            return simpleString;
+    while (!(prev == '\r' && curr == '\n')) {
+        if (curr == '\0') {
+            // TODO:Can jump back when we have more data?
+            resp_error(RESP_ERR_UNEXPECTED_EOF);
         }
         if (i > MAX_SIMPLE_STRING_SIZE) {
             // We reached max size of simple string and cannot add anymore. Something is wrong.
-            UNREACHABLE();
+            resp_error(RESP_ERR_BUFFER_OVERFLOW);
         }
         if (curr != '\r') {
             str.data[i] = curr;
+            str.len++;
         }
         i++;
         prev = curr;
         curr = getNextChar(buffer);
     }
-    // EOF while expecting the string to be finished
-    UNREACHABLE();
+    SimpleString simpleString = {.str = str};
+    return simpleString;
 }
 
-RespArray parse_resp_array(Arena *arena, RequestParserBuffer *buffer) {
+RespArray parse_resp_array(Arena *arena, BufferReader *buffer) {
+    DEBUG_LOG("parse array");
     RespArray array = {0};
     int       len   = read_len(buffer);
-    array.elts      = new (arena, Request *, len);
+    array.elts      = new (arena, Element *, len);
     array.count     = len;
     for (int i = 0; i < len; i++) {
-        Request *element = new (arena, Request, 1);
-        *element         = parse_request(arena, buffer);
+        Element *element = new (arena, Element, 1);
+        *element         = parse_element(arena, buffer);
         array.elts[i]    = element;
     }
     return array;
 }
 
-// TODO: Use scratch arena for request parsing.
-Request parse_request(Arena *arena, RequestParserBuffer *buffer) {
-    Request request = {0};
-    char    c       = getNextChar(buffer);
-    if (c == '\0') {
-        request.empty = 1;
-        return request;
-    }
+Request try_parse_request(Arena *arena, BufferReader *buffer) {
+    Request result       = {0};
+    long    before_parse = buffer->cursor;
+    s8      raw          = {0};
 
-    // Skip the initial part until you see something familiar
-    while (c != '\0') {
-        if (c == '*') {
-            request.val                = new (arena, RespArray);
-            *(RespArray *) request.val = parse_resp_array(arena, buffer);
-            request.type               = ARRAY;
-            return request;
-        } else if (c == '$') {
-            request.val                 = new (arena, BulkString);
-            *(BulkString *) request.val = parse_bulk_string(arena, buffer);
-            request.type                = BULK_STRING;
-            return request;
-        } else if (c == '+') {
-            SimpleString  simple_str    = parse_simple_string(arena, buffer);
-            SimpleString *simple_string = new (arena, SimpleString);
-            simple_string->str          = simple_str.str;
-            request.val                 = simple_string;
-            request.type                = SIMPLE_STRING;
-            return request;
-        } else if (c == '-') {
-            SimpleString simple_str = parse_simple_string(arena, buffer);
-            SimpleError *simple_err = new (arena, SimpleError);
-            simple_err->str         = simple_str.str;
-            request.val             = simple_err;
-            request.type            = SIMPLE_ERROR;
-            return request;
-        } else {
-            // A character that we don't recognize
-            DEBUG_PRINT(c, c);
-            UNREACHABLE();
-        }
+    RespError err = setjmp(resp_error_handler);
+    if (err) {
+        DBG_F("RESP parsing error: %s", resp_error_string(err));
+        Request result = {.empty = 1};
+        buffer->cursor = 0;
+        return result;
     }
-
-    request.error = 1;
-    return request;
+    Element element = parse_element(arena, buffer);
+    raw.len         = buffer->cursor - before_parse;
+    raw.data        = (u8 *) buffer->buffer + before_parse;
+    result.element  = element;
+    result.empty    = 0;
+    result.bytes    = raw;
+    return result;
 }
 
-void *send_response_bulk_string(int conn_fd, s8 str) {
-    // 1 (for '$') + number of digits in str.len + 2 (\r\n) + str.len + 2 (\r\n) + 1 (null
-    // terminator)
+// TODO: Use scratch arena for request parsing.
+Element parse_element(Arena *arena, BufferReader *buffer) {
+    Element element = {0};
+    char    c       = getNextChar(buffer);
+
+    if (c == '*') {
+        element.val                = new (arena, RespArray);
+        *(RespArray *) element.val = parse_resp_array(arena, buffer);
+        element.type               = ARRAY;
+    } else if (c == '$') {
+        element.val                 = new (arena, BulkString);
+        *(BulkString *) element.val = parse_bulk_string(arena, buffer);
+        if (((BulkString *) element.val)->is_rdb) {
+            element.type = RDB_MSG;
+        } else {
+            element.type = BULK_STRING;
+        }
+    } else if (c == '+') {
+        element.val                   = new (arena, SimpleString);
+        *(SimpleString *) element.val = parse_simple_string(arena, buffer);
+        element.type                  = SIMPLE_STRING;
+    } else if (c == '-') {
+        element.val                   = new (arena, SimpleString);
+        *(SimpleString *) element.val = parse_simple_string(arena, buffer);
+        element.type                  = SIMPLE_ERROR;
+    } else {
+        resp_error(RESP_ERR_UNEXPECTED_EOF);
+    }
+
+    return element;
+}
+
+int fill_len(Arena *arena, char *dest, int len, int start_pos) {
     int num_len  = 1;
-    int len_copy = (int) str.len;
+    int len_copy = len;
     while (len_copy /= 10)
         num_len++;
-    int  response_len = 1 + num_len + 2 + (int) str.len + 2 + 1;
-    char response[response_len];
-
-    snprintf(response, response_len, "$%zu\r\n%.*s\r\n", str.len, (int) str.len, str.data);
-    response[response_len - 1] = '\0';
-    DEBUG_PRINT_F("responding with `%s`", response);
-    long sent = send(conn_fd, response, response_len - 1, 0);
-    if (sent < 0) {
-        perror("Could not send response:");
+    int   pos      = start_pos;
+    char *len_str  = new (&(*arena), char, num_len);
+    int   len_pos  = 0;
+    int   temp_len = len;
+    do {
+        len_str[len_pos++] = '0' + (temp_len % 10);
+        temp_len /= 10;
+    } while (temp_len > 0);
+    while (len_pos > 0) {
+        dest[pos++] = len_str[--len_pos];
     }
-    return NULL;
+    return pos;
 }
 
-void *respond_null(int client_fd) {
-    char response[6];
-    response[5] = '\0';
-    snprintf(response, sizeof(response), "$%d\r\n", -1);
-    DEBUG_PRINT_F("responding with `%s`", response);
-    long sent = send(client_fd, response, 5, 0);
-    if (sent < 0) {
-        fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-    } else {
-    }
-    return NULL;
-}
+s8 serde_bulk_str(Arena *arena, s8 str) {
+    int  num_len  = 1;
+    size len_copy = str.len;
+    while (len_copy /= 10)
+        num_len++;
+    // 1 (for '$') + number of digits in str.len + 2 (\r\n) + str.len + 2 (\r\n)
+    int len              = 1 + num_len + 2 + (int) str.len + 2;
+    s8  response         = (s8) {.len = len, .data = new (arena, u8, len)};
+    int pos              = 0;
+    response.data[pos++] = '$';
+    pos                  = fill_len(arena, (char *) response.data, str.len, pos);
 
-long send_response(int client_fd, const char *response) {
-    DEBUG_PRINT(response, s);
-    DEBUG_PRINT(strlen(response), lu);
-    long sent = send(client_fd, response, strlen(response), 0);
-    if (sent < 0) {
-        fprintf(stderr, "Could not send response: %s\n", strerror(errno));
-    }
-    return sent;
+    response.data[pos++] = '\r';
+    response.data[pos++] = '\n';
+
+    memcpy(response.data + pos, str.data, str.len);
+    pos += str.len;
+
+    response.data[pos++] = '\r';
+    response.data[pos++] = '\n';
+
+    return response;
 }
 
 // TODO: use s8 instead of char**
-void send_response_array(int client_fd, char **items, int size) {
-    char response[RESPONSE_ITEM_MAX_SIZE * size + size % 10 + 5];
-    sprintf(response, "*%d\r\n", size);
-    for (int i = 0; i < size; i++) {
-        char formatted[RESPONSE_ITEM_MAX_SIZE];
-        snprintf(formatted, RESPONSE_ITEM_MAX_SIZE, "$%d\r\n%s\r\n", (int) strlen(items[i]),
-                 items[i]);
-        strncat(response, formatted, RESPONSE_ITEM_MAX_SIZE);
+s8 serde_array(Arena *arena, char **items, int item_len) {
+    size resp_len        = RESPONSE_ITEM_MAX_SIZE * item_len + item_len % 10 + 5;
+    s8   response        = (s8) {.len = resp_len, .data = new (arena, u8, resp_len)};
+    int  pos             = 0;
+    response.data[pos++] = '*';
+    pos                  = fill_len(arena, (char *) response.data, item_len, pos);
+
+    response.data[pos++] = '\r';
+    response.data[pos++] = '\n';
+
+    for (int i = 0; i < item_len; i++) {
+        s8 item_formatted = serde_bulk_str(arena, cstr_as_s8(items[i]));
+        memcpy(response.data + pos, item_formatted.data, item_formatted.len);
+        pos += item_formatted.len;
     }
-    send_response(client_fd, response);
+    response.len = pos;
+    return response;
 }

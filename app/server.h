@@ -3,14 +3,20 @@
 
 #include "arena.h"
 #include "hashmap.h"
+#include "resp.h"
 #include "vec.h"
 #include <netinet/in.h>
 
 #define RESPONSE_ITEM_MAX_SIZE 1024
 #define MAX_PATH 1024
+#define MAX_CLIENTS 10
 
-static const char* pongMsg = "+PONG\r\n";
-static const char* okMsg = "+OK\r\n";
+
+typedef struct {
+    size cursor;
+    size len;
+    s8  buffer;
+} BufferWriter;
 
 typedef struct {
     char* dir;
@@ -21,32 +27,60 @@ typedef struct {
     int master_repl_offset;
 } Config;
 
-typedef struct {
-    int conn_fd;
-    HashMap** hashmap;
-    Config* config;
-    Arena* scratch;
-    Arena* perm;
-    vector* replicas;
-} Context;
+typedef enum  {
+    h_ping,
+    h_replconf,
+    h_replconf_2,
+    h_psync,
+    h_fullresync,
+    h_done
+} handshake_state ;
 
 typedef struct {
-    int master_conn;
-    HashMap** hashmap;
-    Config* config;
-    Arena* scratch;
-    Arena* perm;
-    int handshake_done;
-} ReplicationContext;
-
-
-typedef struct {
+    int conn_id;
     int port;
-    int handskahe_done;
+    handshake_state handskahe_done;
     int conn_fd;
 } ReplicaConfig;
 
+typedef struct {
+    int repl_offset;
+    handshake_state handshake_state;
+} ReplicationContext;
+
+typedef struct {
+    int conn_fd;
+    int conn_id;
+    Arena* perm;
+    HashMap** hashmap;
+    int want_read;
+    int want_write;
+    int want_close;
+    // bytes read from the client
+    BufferReader reader;
+    // bytes to be written to the client
+    BufferWriter writer;
+    // If a replica is talking in this connection. Only master
+    ReplicaConfig *replica;
+    // If this a connection to master for replication. Only replica
+    ReplicationContext *replication_context;
+} ClientContext;
+
+typedef struct {
+    int count;
+    int size;
+    struct pollfd *poll_fds;
+    ClientContext *client_contexts;
+} Connections;
+
+typedef struct {
+    Connections *connections;
+    HashMap** hashmap;
+    Config* config;
+    Arena* perm;
+    vector* replicas;
+} ServerContext;
+
 void* connection_handler(void* arg);
 void *master_connection_handler(void *arg);
-void send_response_array(int client_fd, char** items, int size);
 #endif
