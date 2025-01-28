@@ -16,7 +16,6 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <poll.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 BufferReader buffered_reader(Arena *arena, int conn_fd) {
@@ -84,7 +84,7 @@ int add_client(Arena *arena, ServerContext *sv_context, Connections *connections
     fcntl(newfd, F_SETFL, fcntl(newfd, F_GETFL, 0) | O_NONBLOCK);
 
     short event = POLLERR;
-    int   id    = __atomic_fetch_add(&connections->count, 1, __ATOMIC_SEQ_CST);
+    int   id    = connections->count;
     if (id == 0) {
         event |= POLLIN;
     }
@@ -102,6 +102,7 @@ int add_client(Arena *arena, ServerContext *sv_context, Connections *connections
         .want_close = 0,
     };
     connections->client_contexts[id].conn_id = id;
+    connections->count++;
     return id;
 }
 
@@ -153,101 +154,6 @@ void *getConfig(Config *config, char *name) {
     return NULL;
 }
 
-typedef struct {
-    ServerContext      *sv_context;
-    ClientContext      *client_context;
-    ReplicationContext *repl_context;
-    Connections        *conns;
-} HandshakeThreadData;
-
-int handshake(ServerContext *sv_context, ClientContext *ctx, Config *config) {
-    // Initial handshake send a ping
-    Arena *scratch = ctx->perm;
-    char  *ping[1] = {"PING"};
-    s8     request;
-    request = serde_array(sv_context->perm, ping, 1);
-    write_response(ctx, &request);
-    send_writes(ctx->conn_fd, &ctx->writer);
-    append_read_buf(&ctx->reader);
-
-    DEBUG_LOG("send print");
-
-    // char response[100];
-    // first check we got pong
-    // ssize_t nbytes = recv(master_conn_fd, response, sizeof response, 0);
-    // if (nbytes <= 0)
-    //     exit(1);
-    // assert(strncmp(response, (char *) pong_resp.data, nbytes) == 0);
-
-    // Next send the REPLCONF
-    char port[6];
-    sprintf(port, "%d", config->port);
-    char *repl_conf1[3] = {
-        "REPLCONF",
-        "listening-port",
-        port,
-    };
-    request = serde_array(scratch, repl_conf1, 3);
-    write_response(ctx, &request);
-    send_writes(ctx->conn_fd, &ctx->writer);
-    append_read_buf(&ctx->reader);
-    DEBUG_LOG("send replconf 1");
-
-    // Check we got ok
-    // nbytes = recv(master_conn_fd, response, sizeof response, 0);
-    // if (nbytes <= 0)
-    //     exit(1);
-    // assert(strncmp(response, (char *) ok_resp.data, nbytes) == 0);
-
-    char *repl_conf2[3] = {
-        "REPLCONF",
-        "capa",
-        "psync2",
-    };
-    request = serde_array(scratch, repl_conf2, 3);
-    write_response(ctx, &request);
-    send_writes(ctx->conn_fd, &ctx->writer);
-    append_read_buf(&ctx->reader);
-    DEBUG_LOG("send replconf 2");
-
-    // check we got ok
-    // nbytes = recv(master_conn_fd, response, sizeof response, 0);
-    // if (nbytes <= 0)
-    //     exit(1);
-    // assert(strncmp(response, (char *) ok_resp.data, nbytes) == 0);
-
-    // Next send the PYSNC is sent in connection_handler
-    char *psync[3] = {
-        "PSYNC",
-        "?",
-        "-1",
-    };
-    request = serde_array(scratch, psync, 3);
-    write_response(ctx, &request);
-    send_writes(ctx->conn_fd, &ctx->writer);
-    append_read_buf(&ctx->reader);
-    DEBUG_LOG("send psync");
-
-    // TODO:currently discarding the handshake output
-    // RdbMessage initial_rdb = parse_initial_rdb_transfer(scratch, &ctx->reader);
-    // DEBUG_LOG("initial RDB received");
-    // s8print(initial_rdb.raw);
-
-    return 0;
-}
-
-void *handshake_thread(void *arg) {
-    HandshakeThreadData *data = (HandshakeThreadData *) arg;
-    handshake(data->sv_context, data->client_context, data->sv_context->config);
-    int           i         = add_client(data->sv_context->perm, data->sv_context, data->conns,
-                                         data->client_context->conn_fd);
-    ClientContext c_context = data->conns->client_contexts[i];
-    c_context.replication_context = data->repl_context;
-    DBG_F("handshake thread completed master conn %d", i);
-    free(data);
-    return NULL;
-}
-
 void handle_get(ClientContext *ctx, s8 key) {
     printf("responding to get\n");
     HashMapNode node = hashmap_get(*ctx->hashmap, key);
@@ -268,22 +174,62 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
     ClientContext *ctx = c_context;
 
     // TODO: do not use perm arena for short lived req/resp
-    Arena *scratch = c_context->perm;
+    Arena  *scratch = c_context->perm;
+    Element element = request.element;
 
-    DEBUG_LOG("waiting for FULL RESYNC");
-    if (request.element.type == SIMPLE_STRING) {
-        ctx->replication_context->handshake_done = 1;
+    if (element.type == SIMPLE_STRING) {
+        SimpleString *res = ((SimpleString *) element.val);
+        if (s8equals_nocase(res->str, S("pong")) == true) {
+            DEBUG_LOG("handshake first");
+            char port[6];
+            sprintf(port, "%d", sv_context->config->port);
+            char *repl_conf1[3] = {
+                "REPLCONF",
+                "listening-port",
+                port,
+            };
+            s8 request = serde_array(scratch, repl_conf1, 3);
+            write_response(ctx, &request);
+            ctx->replication_context->handshake_state = h_replconf;
+        } else if (s8equals_nocase(res->str, S("ok")) == true) {
+            if (ctx->replication_context->handshake_state == h_replconf) {
+                char *repl_conf2[3] = {
+                    "REPLCONF",
+                    "capa",
+                    "psync2",
+                };
+                s8 request = serde_array(scratch, repl_conf2, 3);
+                write_response(ctx, &request);
+                ctx->replication_context->handshake_state = h_replconf_2;
+            } else if (ctx->replication_context->handshake_state == h_replconf_2) {
+                char *psync[3] = {
+                    "PSYNC",
+                    "?",
+                    "-1",
+                };
+                s8 request = serde_array(scratch, psync, 3);
+                write_response(ctx, &request);
+                ctx->replication_context->handshake_state = h_psync;
+            } else {
+                UNREACHABLE();
+            }
+        } else if (s8startswith(res->str, S("FULLRESYNC")) == true) {
+            DEBUG_LOG("got full resync");
+            ctx->replication_context->handshake_state = h_done;
+        }
         return;
+    } else if (element.type == RDB_MSG) {
+        DEBUG_LOG("Got empty rdb");
+        return; // ignore rdb message
     }
 
-    Element element = request.element;
     DBG_F("replication parsed request %d\n", element.type);
     DBG(c_context->reader.total_read, lu);
 
     if (element.type == BULK_STRING || element.type == SIMPLE_ERROR) {
         return;
     } else if (element.type == SIMPLE_STRING) {
-        ctx->replication_context->handshake_done = 1;
+        ctx->replication_context->handshake_state = 1;
         return;
     }
 
@@ -296,7 +242,6 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
     Element *command_val = resp_array->elts[0];
     assert(command_val->type == BULK_STRING);
     BulkString *command = (BulkString *) command_val->val;
-    s8print(command->str);
 
     if (s8equals_nocase(command->str, S("SET")) == true) {
         assert(resp_array->count >= 3);
@@ -325,7 +270,6 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
 
         HashMapNode hNode = {.key = s8malloc(key->str), .val = s8malloc(val->str), .ttl = ttl};
         hashmap_upsert(ctx->hashmap, ctx->perm, &hNode);
-        write_response(c_context, &ok_resp);
     } else if (s8equals_nocase(command->str, S("REPLCONF")) == true) {
         assert(resp_array->count == 3);
         Element *arg_val = resp_array->elts[1];
@@ -345,8 +289,6 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
             char *items[3] = {"REPLCONF", "ACK", offset_str};
             s8    resp     = serde_array(scratch, items, 3);
             write_response(c_context, &resp);
-        } else {
-            UNREACHABLE();
         }
     } else if (s8equals_nocase(command->str, S("INFO")) == true) {
         assert(resp_array->count == 2);
@@ -431,7 +373,7 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         handle_get(ctx, key->str);
     } else if (s8equals_nocase(command->str, S("SET")) == true) {
         // TODO: extract this to a function and perform on all write operations
-        if (sv_context->replicas != NULL) {
+        if (sv_context->replicas->total != 0) {
             for (int i = 0; i < sv_context->replicas->total; i++) {
                 ReplicaConfig *replica_to_send = (ReplicaConfig *) sv_context->replicas->items[i];
                 printf("propagating command to replica %d\n", replica_to_send->port);
@@ -765,40 +707,21 @@ int main(int argc, char *argv[]) {
             return -1;
         }
 
-        ReplicationContext *context = new (&arena, ReplicationContext);
-        context->repl_offset        = 0;
-        context->handshake_done     = 0;
-
-        ClientContext c_context = (ClientContext) {
-            .conn_fd    = master_conn_fd,
-            .perm       = &arena,
-            .hashmap    = sv_context.hashmap,
-            .reader     = buffered_reader(&arena, master_conn_fd),
-            .writer     = (BufferWriter) {.cursor = 0,
-                                          .len    = 0,
-                                          .buffer = (s8) {.data = new (&arena, u8, 1024), .len = 1024}},
-            .want_read  = 1,
-            .want_write = 0,
-            .want_close = 0,
-        };
-
-        HandshakeThreadData *thread_data = malloc(sizeof(HandshakeThreadData));
-        thread_data->sv_context          = &sv_context;
-        thread_data->client_context      = &c_context;
-        thread_data->repl_context        = context;
-        thread_data->conns               = &conns;
-        pthread_t handshake_tid;
-        if (pthread_create(&handshake_tid, NULL, handshake_thread, thread_data) != 0) {
-            perror("Failed to create handshake thread");
-            free(thread_data);
-            return -1;
-        }
-        pthread_detach(handshake_tid);
-        // TODO: use longjmp after handshake is done
+        ReplicationContext *repl_context = new (&arena, ReplicationContext);
+        repl_context->repl_offset        = 0;
+        repl_context->handshake_state    = 0;
+        int            id                = add_client(&arena, &sv_context, &conns, master_conn_fd);
+        ClientContext *context           = &conns.client_contexts[id];
+        context->replication_context     = repl_context;
+        conns.poll_fds[id].events |= POLLOUT;
+        // write ping
+        char *ping[1] = {"PING"};
+        s8    request = serde_array(&arena, ping, 1);
+        write_response(context, &request);
     }
 
     while (1) {
-        int poll_count = poll(conns.poll_fds, conns.count, -1);
+        int poll_count = poll(conns.poll_fds, conns.count, 1000);
 
         if (poll_count < 0 && errno == EINTR) {
             continue;

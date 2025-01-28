@@ -28,8 +28,11 @@ typedef struct {
 } Config;
 
 typedef enum  {
+    h_ping,
     h_replconf,
+    h_replconf_2,
     h_psync,
+    h_fullresync,
     h_done
 } handshake_state ;
 
@@ -42,7 +45,7 @@ typedef struct {
 
 typedef struct {
     int repl_offset;
-    int handshake_done;
+    handshake_state handshake_state;
 } ReplicationContext;
 
 typedef struct {

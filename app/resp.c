@@ -44,14 +44,6 @@ char getCurrChar(BufferReader *buffer) {
     return '\0';
 }
 
-char rewindChar(BufferReader *buffer) {
-    if (buffer->cursor > 0) {
-        buffer->cursor--;
-        buffer->total_read--;
-    }
-    return buffer->buffer[buffer->cursor];
-}
-
 u8 getNextChar(BufferReader *buffer) {
     if (buffer->cursor >= buffer->length) {
         return '\0';
@@ -60,6 +52,13 @@ u8 getNextChar(BufferReader *buffer) {
     buffer->cursor++;
     buffer->total_read++;
     return c;
+}
+
+u8 peekChar(BufferReader *buffer) {
+    int cursor     = buffer->cursor;
+    u8  curr       = getNextChar(buffer);
+    buffer->cursor = cursor;
+    return curr;
 }
 
 void append_read_buf(BufferReader *buffer) {
@@ -83,7 +82,7 @@ void append_read_buf(BufferReader *buffer) {
         buffer->status = -1;
         return;
     }
-    DEBUG_LOG("received:");
+    DBG_F("received from %d:", buffer->client_fd);
     s8print((s8) {.len = bytes_received, .data = (u8 *) buffer->buffer + buffer->length});
     buffer->length += bytes_received;
     buffer->status = 1;
@@ -150,32 +149,33 @@ BulkString parse_bulk_string(Arena *arena, BufferReader *buffer) {
     buffer->cursor += len_to_copy;
     buffer->total_read += len_to_copy;
     len_to_copy = len - len_to_copy;
-    if (len_to_copy > 0) {
-        for (int i = 0; i < len_to_copy; i++) {
-            str.data[i] = getNextChar(buffer);
-        }
+    for (int i = 0; i < len_to_copy; i++) {
+        str.data[i] = getNextChar(buffer);
     }
 
-    if (getNextChar(buffer) != '\r' || getNextChar(buffer) != '\n') {
-        resp_error(RESP_ERR_MALFORMED_STRING);
+    int is_rdb = 1;
+    if (peekChar(buffer) == '\r') {
+        getNextChar(buffer);
+        if (peekChar(buffer) == '\n') {
+            is_rdb = 0;
+            getNextChar(buffer);
+        }
     }
-    return (BulkString) {.str = str};
+    return (BulkString) {.str = str, .is_rdb = is_rdb};
 }
 
 // Simple strings are encoded as a plus (+) character, followed by a string. The string mustn't
 // contain a CR (\r) or LF (\n) character and is terminated by CRLF (i.e., \r\n).
 SimpleString parse_simple_string(Arena *arena, BufferReader *buffer) {
-    char         prev;
-    char         curr         = getNextChar(buffer);
-    s8           str          = {0};
-    SimpleString simpleString = {0};
+    char curr = getNextChar(buffer);
+    char prev = curr;
     // TODO: simple strings have no length. We max it to 50 here.
     int MAX_SIMPLE_STRING_SIZE = 1024;
-    str.data                   = new (arena, u8, MAX_SIMPLE_STRING_SIZE);
+    s8  str                    = {.data = new (arena, u8, MAX_SIMPLE_STRING_SIZE), .len = 0};
     int i                      = 0;
 
-    while (curr == '\n' && prev == '\r') {
-        if (curr != '\0') {
+    while (!(prev == '\r' && curr == '\n')) {
+        if (curr == '\0') {
             // TODO:Can jump back when we have more data?
             resp_error(RESP_ERR_UNEXPECTED_EOF);
         }
@@ -185,12 +185,13 @@ SimpleString parse_simple_string(Arena *arena, BufferReader *buffer) {
         }
         if (curr != '\r') {
             str.data[i] = curr;
+            str.len++;
         }
         i++;
         prev = curr;
         curr = getNextChar(buffer);
     }
-    resp_error(RESP_ERR_UNEXPECTED_EOF);
+    SimpleString simpleString = {.str = str};
     return simpleString;
 }
 
@@ -241,19 +242,19 @@ Element parse_element(Arena *arena, BufferReader *buffer) {
     } else if (c == '$') {
         element.val                 = new (arena, BulkString);
         *(BulkString *) element.val = parse_bulk_string(arena, buffer);
-        element.type                = BULK_STRING;
+        if (((BulkString *) element.val)->is_rdb) {
+            element.type = RDB_MSG;
+        } else {
+            element.type = BULK_STRING;
+        }
     } else if (c == '+') {
-        SimpleString  simple_str    = parse_simple_string(arena, buffer);
-        SimpleString *simple_string = new (arena, SimpleString);
-        simple_string->str          = simple_str.str;
-        element.val                 = simple_string;
-        element.type                = SIMPLE_STRING;
+        element.val                   = new (arena, SimpleString);
+        *(SimpleString *) element.val = parse_simple_string(arena, buffer);
+        element.type                  = SIMPLE_STRING;
     } else if (c == '-') {
-        SimpleString simple_str = parse_simple_string(arena, buffer);
-        SimpleError *simple_err = new (arena, SimpleError);
-        simple_err->str         = simple_str.str;
-        element.val             = simple_err;
-        element.type            = SIMPLE_ERROR;
+        element.val                   = new (arena, SimpleString);
+        *(SimpleString *) element.val = parse_simple_string(arena, buffer);
+        element.type                  = SIMPLE_ERROR;
     } else {
         resp_error(RESP_ERR_UNEXPECTED_EOF);
     }

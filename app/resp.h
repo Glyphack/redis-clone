@@ -33,11 +33,13 @@ typedef enum {
     BULK_STRING,
     SIMPLE_STRING,
     SIMPLE_ERROR,
+    RDB_MSG,
     ARRAY,
 } ReqType;
 
 typedef struct {
     s8 str;
+    int is_rdb;
 } BulkString;
 
 typedef struct {

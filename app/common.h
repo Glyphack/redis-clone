@@ -4,14 +4,14 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#ifdef DEBUG
-#define DBG(x, format) printf("%s: %" #format "\n", #x, x)
-#define DEBUG_LOG(msg) printf("%s\n", msg)
-#define DBG_F(format, ...) printf(format, __VA_ARGS__)
-#else
+#ifdef NODEBUG
 #define DBG(x, format) /* printf("%s: %" #format "\n", #x, x) */
 #define DEBUG_LOG(msg) /* printf("%s\n", msg) */
 #define DBG_F(format, ...) /* printf(format, __VA_ARGS__) */
+#else
+#define DBG(x, format) printf("%s: %" #format "\n", #x, x)
+#define DEBUG_LOG(msg) printf("%s\n", msg)
+#define DBG_F(format, ...) printf(format, __VA_ARGS__)
 #endif
 
 #define UNREACHABLE() __builtin_unreachable()

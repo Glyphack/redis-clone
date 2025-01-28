@@ -68,6 +68,14 @@ b32 s8equals_nocase(s8 a, s8 b) {
     return 1;
 }
 
+// returns true if s8 starts with another s8
+b32 s8startswith(s8 str, s8 prefix) {
+    if (prefix.len > str.len) {
+        return false;
+    }
+    return memcmp(str.data, prefix.data, prefix.len) == 0;
+}
+
 // Compares two strings lexicographically
 size s8compare(s8 a, s8 b) {
     size min_len = a.len < b.len ? a.len : b.len;

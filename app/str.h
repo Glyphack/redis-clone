@@ -35,6 +35,7 @@ s8 cstr_as_s8(const char *cstr);
 s8   s8span(u8 *, u8 *); 
 b32  s8equals(s8, s8);
 b32 s8equals_nocase(s8, s8);
+b32 s8startswith(s8, s8);
 size s8compare(s8, s8);
 u64  s8hash(s8);
 s8   s8trim(s8);
