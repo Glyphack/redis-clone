@@ -234,8 +234,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    int connection_backlog = 5;
-    if (listen(server_fd, connection_backlog) != 0) {
+    if (listen(server_fd, MAX_CLIENTS) != 0) {
         fprintf(stderr, "Listen failed: %s \n", strerror(errno));
         return 1;
     }

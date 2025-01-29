@@ -8,6 +8,7 @@
 
 #define RESPONSE_ITEM_MAX_SIZE 1024
 #define MAX_PATH 1024
+#define MAX_CLIENTS 1000
 
 static const char* pongMsg = "+PONG\r\n";
 static const char* okMsg = "+OK\r\n";
