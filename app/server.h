@@ -9,7 +9,7 @@
 
 #define RESPONSE_ITEM_MAX_SIZE 1024
 #define MAX_PATH 1024
-#define MAX_CLIENTS 10
+#define MAX_CLIENTS 100
 
 
 typedef struct {

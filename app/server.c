@@ -671,7 +671,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (listen(server_fd, 10) != 0) {
+    if (listen(server_fd, MAX_CLIENTS) != 0) {
         fprintf(stderr, "Listen failed: %s \n", strerror(errno));
         return 1;
     }
@@ -684,7 +684,7 @@ int main(int argc, char *argv[]) {
            .poll_fds        = malloc(sizeof(struct pollfd) * 5),
            .client_contexts = malloc(sizeof(ClientContext) * 5),
            .count           = 0,
-           .size            = 5,
+           .size            = MAX_CLIENTS,
     };
     ServerContext sv_context = {
         .hashmap     = &hashmap,

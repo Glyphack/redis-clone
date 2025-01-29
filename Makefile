@@ -11,6 +11,6 @@ test:
 	python test/test.py
 
 benchmark:
-	redis-benchmark -t set -c 3 -n 10000
+	redis-benchmark -t set -c 50 -n 10000
 
 .PHONY: test run build
