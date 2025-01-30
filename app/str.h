@@ -43,5 +43,5 @@ s8   s8clone(Arena *, s8);
 // TODO: Check usages and use arena 
 s8   s8malloc(s8);
 void s8print(s8);
-int s8toint(s8 str);
+f64 s8tof64(s8 str);
 #endif

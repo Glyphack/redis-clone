@@ -313,7 +313,7 @@ s8 serde_int(Arena *arena, int val) {
     int len         = 1 + val_size + 2;
     s8  str         = (s8) {.data = new (arena, u8, len), .len = len};
     str.data[0]     = ':';
-    int pos         = fill_len(arena, (char *) str.data, val_copy, 1);
+    int pos         = fill_len(arena, (char *) str.data, val, 1);
     str.data[pos++] = '\r';
     str.data[pos++] = '\n';
     return str;

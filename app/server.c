@@ -558,10 +558,14 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
 
     } else if (s8equals_nocase(command->str, S("wait")) == true) {
         Element *arg1_val   = resp_array->elts[1];
-        int      wait_count = s8toint(((BulkString *) arg1_val->val)->str);
+        int      wait_count = s8tof64(((BulkString *) arg1_val->val)->str);
+        void    *arg2_val   = resp_array->elts[2]->val;
+        int      timeout    = s8tof64(((BulkString *) arg2_val)->str);
         DBG(wait_count, d);
+        DBG(timeout, d);
         int replica_count = sv_context->replicas->total;
-        s8  response      = serde_int(c_context->perm, replica_count);
+        DBG(replica_count, d);
+        s8 response = serde_int(c_context->perm, replica_count);
         write_response(c_context, &response);
 
     } else {
