@@ -38,9 +38,10 @@ typedef enum  {
 
 typedef struct {
     int conn_id;
-    int port;
-    handshake_state handskahe_done;
     int conn_fd;
+    int port;
+    struct sockaddr_in* address;
+    handshake_state handskahe_done;
 } ReplicaConfig;
 
 typedef struct {
@@ -62,8 +63,7 @@ typedef struct {
     BufferWriter writer;
     // If a replica is talking in this connection. Only master
     ReplicaConfig *replica;
-    // If this a connection to master for replication. Only replica
-    ReplicationContext *replication_context;
+    int is_connection_to_master;
 } ClientContext;
 
 typedef struct {
@@ -79,6 +79,8 @@ typedef struct {
     Config* config;
     Arena* perm;
     vector* replicas;
+    // If this a connection to master for replication. Only replica
+    ReplicationContext *replication_context;
 } ServerContext;
 
 void* connection_handler(void* arg);

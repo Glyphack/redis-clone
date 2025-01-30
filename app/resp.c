@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 // Error string lookup function
 const char *resp_error_string(RespError err) {
@@ -66,8 +67,8 @@ void append_read_buf(BufferReader *buffer) {
         printf("read buffer full\n");
         abort();
     }
-    long bytes_received = recv(buffer->client_fd, buffer->buffer + buffer->length,
-                               buffer->capacity - buffer->length, 0);
+    long bytes_received =
+        read(buffer->client_fd, buffer->buffer + buffer->length, buffer->capacity - buffer->length);
     if (bytes_received == 0) {
         DEBUG_LOG("read everything from client");
         buffer->status = 0;
