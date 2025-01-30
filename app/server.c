@@ -559,8 +559,11 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
     } else if (s8equals_nocase(command->str, S("wait")) == true) {
         Element *arg1_val   = resp_array->elts[1];
         int      wait_count = s8tof64(((BulkString *) arg1_val->val)->str);
-        void    *arg2_val   = resp_array->elts[2]->val;
-        int      timeout    = s8tof64(((BulkString *) arg2_val)->str);
+        int      timeout    = 0;
+        if (resp_array->count >= 2) {
+            void *arg2_val = resp_array->elts[2]->val;
+            timeout        = s8tof64(((BulkString *) arg2_val)->str);
+        }
         DBG(wait_count, d);
         DBG(timeout, d);
         int replica_count = sv_context->replicas->total;
