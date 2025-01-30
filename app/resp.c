@@ -305,6 +305,20 @@ s8 serde_bulk_str(Arena *arena, s8 str) {
     return response;
 }
 
+s8 serde_int(Arena *arena, int val) {
+    int val_size = 1;
+    int val_copy = val;
+    while (val_copy /= 10)
+        val_size++;
+    int len         = 1 + val_size + 2;
+    s8  str         = (s8) {.data = new (arena, u8, len), .len = len};
+    str.data[0]     = ':';
+    int pos         = fill_len(arena, (char *) str.data, val_copy, 1);
+    str.data[pos++] = '\r';
+    str.data[pos++] = '\n';
+    return str;
+}
+
 // TODO: use s8 instead of char**
 s8 serde_array(Arena *arena, char **items, int item_len) {
     size resp_len        = RESPONSE_ITEM_MAX_SIZE * item_len + item_len % 10 + 5;

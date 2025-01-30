@@ -94,9 +94,9 @@ RespArray parse_resp_array(Arena *arena, BufferReader *buffer);
 Element parse_element(Arena *arena, BufferReader *buffer);
 RdbMessage parse_initial_rdb_transfer(Arena *arena, BufferReader *buffer);
 
-// Serde functions
 s8 serde_bulk_str(Arena *arena, s8 str);
 s8 serde_array(Arena *arena, char **items, int item_len);
+s8 serde_int(Arena *arena, int val);
 
 void append_read_buf(BufferReader *);
 #endif

@@ -555,6 +555,11 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
             DBG_F("handshake with replica at %d done. conn id: %d\n", c_context->replica->port,
                   c_context->conn_id);
         }
+
+    } else if (s8equals_nocase(command->str, S("wait")) == true) {
+        s8 response = serde_int(c_context->perm, 0);
+        write_response(c_context, &response);
+
     } else {
         printf("Unknown request type\n");
     }
