@@ -16,6 +16,7 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,7 +64,7 @@ int send_writes(int fd, BufferWriter *writer) {
     u8  *to_write     = writer->buffer.data + writer->cursor;
     size to_write_len = writer->len - writer->cursor;
     DBG_F("Writing response to %d\n", fd);
-    size written = send(fd, to_write, to_write_len, 0);
+    size written = write(fd, to_write, to_write_len);
     if (written < 0) {
         perror("send");
         return -1;
@@ -90,16 +91,17 @@ int add_client(Arena *arena, ServerContext *sv_context, Connections *connections
     }
     connections->poll_fds[id]        = (struct pollfd) {.fd = newfd, .events = event, .revents = 0};
     connections->client_contexts[id] = (ClientContext) {
-        .conn_fd    = newfd,
-        .perm       = arena,
-        .hashmap    = sv_context->hashmap,
-        .reader     = buffered_reader(arena, newfd),
-        .writer     = (BufferWriter) {.cursor = 0,
-                                      .len    = 0,
-                                      .buffer = (s8) {.data = new (arena, u8, 1024), .len = 1024}},
-        .want_read  = 1,
-        .want_write = 0,
-        .want_close = 0,
+        .conn_fd                 = newfd,
+        .perm                    = arena,
+        .hashmap                 = sv_context->hashmap,
+        .reader                  = buffered_reader(arena, newfd),
+        .writer                  = (BufferWriter) {.cursor = 0,
+                                                   .len    = 0,
+                                                   .buffer = (s8) {.data = new (arena, u8, 1024), .len = 1024}},
+        .want_read               = 1,
+        .want_write              = 0,
+        .want_close              = 0,
+        .is_connection_to_master = 0,
     };
     connections->client_contexts[id].conn_id = id;
     connections->count++;
@@ -190,9 +192,9 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
             };
             s8 request = serde_array(scratch, repl_conf1, 3);
             write_response(ctx, &request);
-            ctx->replication_context->handshake_state = h_replconf;
+            sv_context->replication_context->handshake_state = h_replconf;
         } else if (s8equals_nocase(res->str, S("ok")) == true) {
-            if (ctx->replication_context->handshake_state == h_replconf) {
+            if (sv_context->replication_context->handshake_state == h_replconf) {
                 char *repl_conf2[3] = {
                     "REPLCONF",
                     "capa",
@@ -200,8 +202,8 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
                 };
                 s8 request = serde_array(scratch, repl_conf2, 3);
                 write_response(ctx, &request);
-                ctx->replication_context->handshake_state = h_replconf_2;
-            } else if (ctx->replication_context->handshake_state == h_replconf_2) {
+                sv_context->replication_context->handshake_state = h_replconf_2;
+            } else if (sv_context->replication_context->handshake_state == h_replconf_2) {
                 char *psync[3] = {
                     "PSYNC",
                     "?",
@@ -209,13 +211,13 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
                 };
                 s8 request = serde_array(scratch, psync, 3);
                 write_response(ctx, &request);
-                ctx->replication_context->handshake_state = h_psync;
+                sv_context->replication_context->handshake_state = h_psync;
             } else {
                 UNREACHABLE();
             }
         } else if (s8startswith(res->str, S("FULLRESYNC")) == true) {
             DEBUG_LOG("got full resync");
-            ctx->replication_context->handshake_state = h_done;
+            sv_context->replication_context->handshake_state = h_done;
         }
         return;
     } else if (element.type == RDB_MSG) {
@@ -229,7 +231,7 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
     if (element.type == BULK_STRING || element.type == SIMPLE_ERROR) {
         return;
     } else if (element.type == SIMPLE_STRING) {
-        ctx->replication_context->handshake_state = 1;
+        sv_context->replication_context->handshake_state = 1;
         return;
     }
 
@@ -279,13 +281,13 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
         if (s8equals_nocase(arg->str, S("GETACK"))) {
             // ["replconf", "getack", "*"]
             DEBUG_LOG("responding to replconf get ack");
-            DBG(ctx->replication_context->repl_offset, d);
+            DBG(sv_context->replication_context->repl_offset, d);
             assert(resp_array->count == 3);
             assert(resp_array->elts[2]->type == BULK_STRING);
             s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
             assert(s8equals_nocase(arg_2_value, S("*")));
             char *offset_str = new (scratch, char, 10);
-            snprintf(offset_str, 10, "%d", ctx->replication_context->repl_offset);
+            snprintf(offset_str, 10, "%d", sv_context->replication_context->repl_offset);
             char *items[3] = {"REPLCONF", "ACK", offset_str};
             s8    resp     = serde_array(scratch, items, 3);
             write_response(c_context, &resp);
@@ -301,6 +303,7 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
             UNREACHABLE();
         }
 
+        // TODO: Not useful for replicas
         int total_size = 13; // "role:master\n" or "role:slave\n" (12 chars + \n)
         total_size += strlen("master_replid:") + 20 + 1;      // replid info + \n
         total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
@@ -321,8 +324,66 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
         printf("Unknown request type\n");
     }
 
-    ctx->replication_context->repl_offset += request.bytes.len;
-    DBG(ctx->replication_context->repl_offset, d);
+    sv_context->replication_context->repl_offset += request.bytes.len;
+    DBG(sv_context->replication_context->repl_offset, d);
+}
+
+// Structure to pass data to threads
+typedef struct {
+    int    conn_fd;
+    Arena *perm;
+    int    replica_id;
+    int    repl_offset;
+    int   *synced_count;
+    int    timeout; // timeout in milliseconds
+} WaitData;
+
+// Thread function
+void *send_to_replica(void *arg) {
+    WaitData *data       = (WaitData *) arg;
+    long long start_time = get_current_time();
+    DBG_F("syncing with replica %d at time %lld ms\n", data->replica_id, start_time);
+
+    char *items[3] = {"REPLCONF", "GETACK", "*"};
+    s8    req      = serde_array(data->perm, items, 3);
+    send(data->conn_fd, req.data, req.len, 0);
+    int conn_fd = data->conn_fd;
+
+    struct pollfd pfd = {
+        .fd     = conn_fd,
+        .events = POLLIN,
+    };
+
+    BufferReader reader = buffered_reader(data->perm, conn_fd);
+    do {
+        int poll_result = poll(&pfd, 1, data->timeout);
+        if (poll_result == 0) {
+            long long end_time = get_current_time();
+            DBG_F("timeout waiting for replica %d after %lld ms\n", data->replica_id,
+                  end_time - start_time);
+            free(data);
+            return NULL;
+        }
+        if (poll_result < 0) {
+            perror("poll");
+            free(data);
+            return NULL;
+        }
+
+        append_read_buf(&reader);
+    } while (reader.status == 2);
+
+    Element element = parse_element(data->perm, &reader);
+    int     offset = (int) s8tof64(((BulkString *) ((RespArray *) element.val)->elts[2]->val)->str);
+    DBG(offset, d);
+    DBG(data->repl_offset, d);
+    if (offset == data->repl_offset + 37 || (offset == data->repl_offset)) {
+        __atomic_add_fetch(data->synced_count, 1, __ATOMIC_SEQ_CST);
+        DEBUG_LOG("Found a synced replica");
+    }
+
+    free(data);
+    return NULL;
 }
 
 void handle_request(ServerContext *sv_context, ClientContext *c_context, Request request) {
@@ -383,6 +444,7 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
                 replica_context->want_write = 1;
             }
             DEBUG_LOG("propagated");
+            sv_context->config->master_repl_offset += request.bytes.len;
         }
         assert(resp_array->count >= 3);
         Element *key_val = resp_array->elts[1];
@@ -499,8 +561,18 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         if (s8equals_nocase(arg->str, S("listening-port"))) {
             Element *port_val = resp_array->elts[2];
             assert(port_val->type == BULK_STRING);
-            BulkString *port_str     = (BulkString *) port_val->val;
-            c_context->replica->port = atoi(s8_to_cstr(scratch, port_str->str));
+            BulkString *port_str          = (BulkString *) port_val->val;
+            c_context->replica->port      = atoi(s8_to_cstr(scratch, port_str->str));
+            struct sockaddr_in *serv_addr = new (sv_context->perm, struct sockaddr_in);
+            // TODO: host info is not always right
+            char *host            = "127.0.0.1";
+            serv_addr->sin_family = AF_INET;
+            serv_addr->sin_port   = htons(c_context->replica->port);
+            if (inet_pton(AF_INET, host, &serv_addr->sin_addr) <= 0) {
+                printf("\nInvalid address/ Address not supported \n");
+                abort();
+            }
+            c_context->replica->address = serv_addr;
             write_response(c_context, &ok_resp);
         } else if (s8equals_nocase(arg->str, S("capa"))) {
             Element *capa_val = resp_array->elts[2];
@@ -514,6 +586,18 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
             }
             write_response(c_context, &ok_resp);
             c_context->replica->handskahe_done = h_psync;
+        } else if (s8equals_nocase(arg->str, S("GETACK"))) {
+            DEBUG_LOG("responding to replconf get ack");
+            DBG(sv_context->replication_context->repl_offset, d);
+            assert(resp_array->count == 3);
+            assert(resp_array->elts[2]->type == BULK_STRING);
+            s8 arg_2_value = ((BulkString *) resp_array->elts[2]->val)->str;
+            assert(s8equals_nocase(arg_2_value, S("*")));
+            char *offset_str = new (scratch, char, 10);
+            snprintf(offset_str, 10, "%d", sv_context->replication_context->repl_offset);
+            char *items[3] = {"REPLCONF", "ACK", offset_str};
+            s8    resp     = serde_array(scratch, items, 3);
+            write_response(c_context, &resp);
         } else {
             UNREACHABLE();
         }
@@ -568,9 +652,56 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         DBG(timeout, d);
         int replica_count = sv_context->replicas->total;
         DBG(replica_count, d);
-        s8 response = serde_int(c_context->perm, replica_count);
-        write_response(c_context, &response);
+        int synced_replicas = 0;
 
+        DBG(sv_context->config->master_repl_offset, d);
+        if (sv_context->config->master_repl_offset == 0) {
+            s8 response = serde_int(c_context->perm, replica_count);
+            write_response(c_context, &response);
+            return;
+        }
+        // Create and launch threads
+        pthread_t threads[MAX_CLIENTS];
+        int       thread_count = 0;
+
+        // Launch threads
+        for (int i = 0; i < sv_context->replicas->total; i++) {
+            ReplicaConfig *replica = get_vec(sv_context->replicas, i);
+            ClientContext *replica_context =
+                &sv_context->connections->client_contexts[replica->conn_id];
+            WaitData *data     = malloc(sizeof(WaitData));
+            data->conn_fd      = replica_context->conn_fd;
+            data->perm         = ctx->perm;
+            data->replica_id   = i;
+            data->repl_offset  = sv_context->config->master_repl_offset;
+            data->synced_count = &synced_replicas;
+            data->timeout      = timeout;
+
+            if (pthread_create(&threads[i], NULL, send_to_replica, data) != 0) {
+                fprintf(stderr, "Failed to create thread for replica %d\n", i);
+                free(data);
+                continue;
+            }
+            thread_count++;
+        }
+
+        // Wait for threads with timeout
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += timeout / 1000;
+        ts.tv_nsec += (timeout % 1000) * 1000000;
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000;
+        }
+
+        // Wait for all threads to complete
+        for (int i = 0; i < thread_count; i++) {
+            pthread_join(threads[i], NULL);
+        }
+
+        s8 response = serde_int(c_context->perm, synced_replicas);
+        write_response(c_context, &response);
     } else {
         printf("Unknown request type\n");
     }
@@ -728,7 +859,8 @@ int main(int argc, char *argv[]) {
         repl_context->handshake_state    = 0;
         int            id                = add_client(&arena, &sv_context, &conns, master_conn_fd);
         ClientContext *context           = &conns.client_contexts[id];
-        context->replication_context     = repl_context;
+        context->is_connection_to_master = 1;
+        sv_context.replication_context   = repl_context;
         conns.poll_fds[id].events |= POLLOUT;
         // write ping
         char *ping[1] = {"PING"};
@@ -793,7 +925,7 @@ int main(int argc, char *argv[]) {
                         conn->want_read     = 0;
                         conn->want_write    = 1;
                     }
-                    if (conn->replication_context) {
+                    if (conn->is_connection_to_master) {
                         handle_master_request(&sv_context, conn, request);
                     } else {
                         handle_request(&sv_context, conn, request);
