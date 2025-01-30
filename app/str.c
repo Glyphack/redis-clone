@@ -158,3 +158,12 @@ void s8print(s8 str) {
     putchar('\'');
     putchar('\n');
 }
+
+int s8toint(s8 str) {
+    int num = 0;
+    for (int i = 0; i < str.len; i++) {
+        num = (10 * num) + str.data[i] - '0';
+    }
+
+    return num;
+}

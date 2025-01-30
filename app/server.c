@@ -557,7 +557,11 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         }
 
     } else if (s8equals_nocase(command->str, S("wait")) == true) {
-        s8 response = serde_int(c_context->perm, 0);
+        Element *arg1_val   = resp_array->elts[1];
+        int      wait_count = s8toint(((BulkString *) arg1_val->val)->str);
+        DBG(wait_count, d);
+        int replica_count = sv_context->replicas->total;
+        s8  response      = serde_int(c_context->perm, replica_count);
         write_response(c_context, &response);
 
     } else {
