@@ -130,12 +130,13 @@ s8 s8clone(Arena *arena, s8 str) {
     return result;
 }
 
-// Creates a copy of the string using malloc
-s8 s8malloc(s8 str) {
+// Concatenates two strings into a new string allocated in the provided arena
+s8 s8concat(Arena *arena, s8 a, s8 b) {
     s8 result;
-    result.len  = str.len;
-    result.data = malloc(str.len);
-    memcpy(result.data, str.data, str.len);
+    result.len  = a.len + b.len;
+    result.data = new (arena, u8, result.len);
+    memcpy(result.data, a.data, a.len);
+    memcpy(result.data + a.len, b.data, b.len);
     return result;
 }
 
@@ -159,7 +160,7 @@ void s8print(s8 str) {
     putchar('\n');
 }
 
-f64 s8tof64(s8 str) {
+i64 s8to_i64(s8 str) {
     int num = 0;
     for (int i = 0; i < str.len; i++) {
         num = (10 * num) + str.data[i] - '0';

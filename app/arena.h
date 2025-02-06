@@ -14,9 +14,9 @@
 #define new4(a, t, n, f) (t *)alloc(a, mysizeof(t), __alignof__(t), n, f)
 
 typedef struct {
-  byte *offset;
-  byte *begin;
-  byte *end;
+  char *offset;
+  char *begin;
+  char *end;
 } Arena;
 
 Arena newarena(size cap);

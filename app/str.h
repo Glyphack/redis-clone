@@ -40,8 +40,7 @@ size s8compare(s8, s8);
 u64  s8hash(s8);
 s8   s8trim(s8);
 s8   s8clone(Arena *, s8);
-// TODO: Check usages and use arena 
-s8   s8malloc(s8);
+s8 s8concat(Arena *arena, s8 a, s8 b);
 void s8print(s8);
-f64 s8tof64(s8 str);
+i64 s8to_i64(s8 str);
 #endif

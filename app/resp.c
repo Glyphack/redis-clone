@@ -263,7 +263,7 @@ Element parse_element(Arena *arena, BufferReader *buffer) {
     return element;
 }
 
-int fill_len(Arena *arena, char *dest, int len, int start_pos) {
+int insert_number(Arena *arena, char *dest, int len, int start_pos) {
     int num_len  = 1;
     int len_copy = len;
     while (len_copy /= 10)
@@ -292,7 +292,7 @@ s8 serde_bulk_str(Arena *arena, s8 str) {
     s8  response         = (s8) {.len = len, .data = new (arena, u8, len)};
     int pos              = 0;
     response.data[pos++] = '$';
-    pos                  = fill_len(arena, (char *) response.data, str.len, pos);
+    pos                  = insert_number(arena, (char *) response.data, str.len, pos);
 
     response.data[pos++] = '\r';
     response.data[pos++] = '\n';
@@ -314,7 +314,7 @@ s8 serde_int(Arena *arena, int val) {
     int len         = 1 + val_size + 2;
     s8  str         = (s8) {.data = new (arena, u8, len), .len = len};
     str.data[0]     = ':';
-    int pos         = fill_len(arena, (char *) str.data, val, 1);
+    int pos         = insert_number(arena, (char *) str.data, val, 1);
     str.data[pos++] = '\r';
     str.data[pos++] = '\n';
     return str;
@@ -326,7 +326,7 @@ s8 serde_array(Arena *arena, char **items, int item_len) {
     s8   response        = (s8) {.len = resp_len, .data = new (arena, u8, resp_len)};
     int  pos             = 0;
     response.data[pos++] = '*';
-    pos                  = fill_len(arena, (char *) response.data, item_len, pos);
+    pos                  = insert_number(arena, (char *) response.data, item_len, pos);
 
     response.data[pos++] = '\r';
     response.data[pos++] = '\n';

@@ -29,7 +29,7 @@
 
 BufferReader buffered_reader(Arena *arena, int conn_fd) {
     int          capacity = 64 * 1024; // 64KB chunks
-    byte        *buf      = new (arena, byte, capacity);
+    char        *buf      = new (arena, char, capacity);
     BufferReader buffer   = (BufferReader) {
           .buffer     = buf,
           .cursor     = 0,
@@ -80,7 +80,10 @@ int send_writes(int fd, BufferWriter *writer) {
 
 int add_client(Arena *arena, ServerContext *sv_context, Connections *connections, int newfd) {
     if (connections->count == connections->size) {
-        UNREACHABLE();
+        fprintf(stderr, "Max client limit (%d) reached. Cannot add more clients.\n",
+                connections->size);
+        close(newfd);
+        return -1;
     }
     fcntl(newfd, F_SETFL, fcntl(newfd, F_GETFL, 0) | O_NONBLOCK);
 
@@ -89,15 +92,21 @@ int add_client(Arena *arena, ServerContext *sv_context, Connections *connections
     if (id == 0) {
         event |= POLLIN;
     }
-    connections->poll_fds[id]        = (struct pollfd) {.fd = newfd, .events = event, .revents = 0};
+    connections->poll_fds[id] = (struct pollfd) {.fd = newfd, .events = event, .revents = 0};
+    int          FULL_MEM     = 100 * 1024;
+    Arena        temp_arena   = newarena(FULL_MEM);
+    BufferWriter writer       = (BufferWriter) {
+              .cursor = 0,
+              .len    = 0,
+              .buffer = (s8) {.data = new (&temp_arena, u8, FULL_MEM / 10), .len = 1024},
+    };
     connections->client_contexts[id] = (ClientContext) {
         .conn_fd                 = newfd,
         .perm                    = arena,
+        .temp                    = temp_arena,
         .hashmap                 = sv_context->hashmap,
         .reader                  = buffered_reader(arena, newfd),
-        .writer                  = (BufferWriter) {.cursor = 0,
-                                                   .len    = 0,
-                                                   .buffer = (s8) {.data = new (arena, u8, 1024), .len = 1024}},
+        .writer                  = writer,
         .want_read               = 1,
         .want_write              = 0,
         .want_close              = 0,
@@ -110,9 +119,10 @@ int add_client(Arena *arena, ServerContext *sv_context, Connections *connections
 
 void del_connection(Connections *connections, int i) {
     DBG_F("client %d removed\n", i);
+    ClientContext del_con = connections->client_contexts[i];
+    droparena(&del_con.temp);
     connections->poll_fds[i]        = connections->poll_fds[connections->count - 1];
     connections->client_contexts[i] = connections->client_contexts[connections->count - 1];
-    // ClientContext del_con           = connections->client_contexts[i];
     connections->count--;
 }
 
@@ -126,31 +136,33 @@ long long get_current_time() {
 }
 
 void print_config(Config *config) {
-    fprintf(stderr, "config:\n");
-    fprintf(stderr, "  dir `%s`\n", config->dir);
-    fprintf(stderr, "  dbfilename `%s`\n", config->dbfilename);
-    fprintf(stderr, "  port `%d`\n", config->port);
+    printf("config:\n");
+    printf("  dir: ");
+    s8print(config->dir);
+    printf("  dbfilename: ");
+    s8print(config->dbfilename);
+    printf("  port `%d`\n", config->port);
     if (config->master_info != NULL) {
         char ip_str[INET_ADDRSTRLEN];
         if (inet_ntop(AF_INET, &(config->master_info->sin_addr), ip_str, INET_ADDRSTRLEN) == NULL) {
             perror("inet_ntop");
         }
-        fprintf(stderr, "  master host `%s`\n", ip_str);
-        fprintf(stderr, "  master port `%d`\n", config->master_info->sin_port);
+        printf("  master host `%s`\n", ip_str);
+        printf("  master port `%d`\n", config->master_info->sin_port);
     }
 }
 
-void *getConfig(Config *config, char *name) {
-    if (strcmp(name, "dir") == 0) {
-        return config->dir;
+void *getConfig(Config *config, s8 name) {
+    if (s8equals(name, S("dir"))) {
+        return config->dir.data;
     }
-    if (strcmp(name, "dbfilename") == 0) {
-        return config->dbfilename;
+    if (s8equals(name, S("dbfilename"))) {
+        return config->dbfilename.data;
     }
-    if (strcmp(name, "appendonly") == 0) {
+    if (s8equals(name, S("appendonly"))) {
         return "no"; // Explicitly disable AOF persistence
     }
-    if (strcmp(name, "save") == 0) {
+    if (s8equals(name, S("save"))) {
         return ""; // Empty string means RDB persistence is disabled
     }
     return NULL;
@@ -270,7 +282,8 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
             ttl                      = current_time + atoi(s8_to_cstr(scratch, ttl_str->str));
         }
 
-        HashMapNode hNode = {.key = s8malloc(key->str), .val = s8malloc(val->str), .ttl = ttl};
+        HashMapNode hNode = {
+            .key = s8clone(ctx->perm, key->str), .val = s8clone(ctx->perm, val->str), .ttl = ttl};
         hashmap_upsert(ctx->hashmap, ctx->perm, &hNode);
     } else if (s8equals_nocase(command->str, S("REPLCONF")) == true) {
         assert(resp_array->count == 3);
@@ -309,17 +322,32 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
         total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
         total_size += 1;                                      // null terminator
 
-        char *response = new (scratch, byte, total_size);
-        int   offset   = 0;
+        s8  response = (s8) {.len = total_size, .data = new (scratch, u8, total_size)};
+        int offset   = 0;
 
-        offset += sprintf(response + offset, "role:%s\n",
-                          sv_context->config->master_info != NULL ? "slave" : "master");
-        offset +=
-            sprintf(response + offset, "master_replid:%s\n", sv_context->config->master_replid);
-        offset += sprintf(response + offset, "master_repl_offset:%d\n",
-                          sv_context->config->master_repl_offset);
+        s8 type;
+        type    = sv_context->config->master_info != NULL ? S("slave") : S("master");
+        s8 role = S("role:");
+        memcpy(response.data, role.data, role.len);
+        offset += role.len;
+        memcpy(response.data + offset, type.data, type.len);
+        offset += type.len;
+        response.data[offset] = '\n';
+        offset++;
+        s8 repl_id = S("master_replid:");
+        memcpy(response.data, repl_id.data, repl_id.len);
+        offset += repl_id.len;
+        memcpy(response.data + offset, sv_context->config->master_replid.data,
+               sv_context->config->master_replid.len);
+        offset += type.len;
+        response.data[offset] = '\n';
+        s8 repl_offset        = S("master_repl_offset:");
+        memcpy(response.data, repl_offset.data, repl_offset.len);
+        offset += repl_offset.len;
+        insert_number(scratch, response.data, sv_context->config->master_repl_offset, offset);
+        response.data[offset] = '\n';
 
-        serde_bulk_str(ctx->perm, s8_from_cstr(scratch, response));
+        serde_bulk_str(ctx->perm, response);
     } else {
         printf("Unknown request type\n");
     }
@@ -328,68 +356,9 @@ void handle_master_request(ServerContext *sv_context, ClientContext *c_context, 
     DBG(sv_context->replication_context->repl_offset, d);
 }
 
-// Structure to pass data to threads
-typedef struct {
-    int    conn_fd;
-    Arena *perm;
-    int    replica_id;
-    int    repl_offset;
-    int   *synced_count;
-    int    timeout; // timeout in milliseconds
-} WaitData;
-
-// Thread function
-void *send_to_replica(void *arg) {
-    WaitData *data       = (WaitData *) arg;
-    long long start_time = get_current_time();
-    DBG_F("syncing with replica %d at time %lld ms\n", data->replica_id, start_time);
-
-    char *items[3] = {"REPLCONF", "GETACK", "*"};
-    s8    req      = serde_array(data->perm, items, 3);
-    send(data->conn_fd, req.data, req.len, 0);
-    int conn_fd = data->conn_fd;
-
-    struct pollfd pfd = {
-        .fd     = conn_fd,
-        .events = POLLIN,
-    };
-
-    BufferReader reader = buffered_reader(data->perm, conn_fd);
-    do {
-        int poll_result = poll(&pfd, 1, data->timeout);
-        if (poll_result == 0) {
-            long long end_time = get_current_time();
-            DBG_F("timeout waiting for replica %d after %lld ms\n", data->replica_id,
-                  end_time - start_time);
-            free(data);
-            return NULL;
-        }
-        if (poll_result < 0) {
-            perror("poll");
-            free(data);
-            return NULL;
-        }
-
-        append_read_buf(&reader);
-    } while (reader.status == 2);
-
-    Element element = parse_element(data->perm, &reader);
-    int     offset = (int) s8tof64(((BulkString *) ((RespArray *) element.val)->elts[2]->val)->str);
-    DBG(offset, d);
-    DBG(data->repl_offset, d);
-    if (offset == data->repl_offset + 37 || (offset == data->repl_offset)) {
-        __atomic_add_fetch(data->synced_count, 1, __ATOMIC_SEQ_CST);
-        DEBUG_LOG("Found a synced replica");
-    }
-
-    free(data);
-    return NULL;
-}
-
 void handle_request(ServerContext *sv_context, ClientContext *c_context, Request request) {
     Element element = request.element;
-    // TODO: do not use perm arena for short lived req/resp
-    Arena *scratch = c_context->perm;
+    Arena  *scratch = &c_context->temp;
     if (element.type != ARRAY) {
         printf("Request invalid\n");
         return;
@@ -471,7 +440,8 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         }
         DEBUG_LOG("ttl set");
 
-        HashMapNode hNode = {.key = s8malloc(key->str), .val = s8malloc(val->str), .ttl = ttl};
+        HashMapNode hNode = {
+            .key = s8clone(ctx->perm, key->str), .val = s8clone(ctx->perm, val->str), .ttl = ttl};
         DEBUG_LOG("upserted message");
         hashmap_upsert(ctx->hashmap, ctx->perm, &hNode);
         write_response(c_context, &ok_resp);
@@ -491,11 +461,13 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
             write_response(c_context, &null_resp);
             return;
         }
-        char *key_chars[keys->total];
+        char *key_chars = new (scratch, char, keys->total);
         for (int i = 0; i < keys->total; i++) {
-            key_chars[i] = keys->items[i];
+            key_chars[i] = *(char *) keys->items[i];
         }
-        s8 response = serde_array(ctx->perm, key_chars, keys->total);
+        free(keys->items);
+        free(keys);
+        s8 response = serde_array(scratch, &key_chars, keys->total);
         write_response(c_context, &response);
     } else if (s8equals_nocase(command->str, S("CONFIG")) == true) {
         assert(resp_array->count == 3);
@@ -512,7 +484,7 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         assert(arg_val->type == BULK_STRING);
         BulkString *arg = (BulkString *) arg_val->val;
 
-        char *config_val = getConfig(sv_context->config, s8_to_cstr(scratch, arg->str));
+        char *config_val = getConfig(sv_context->config, arg->str);
         if (config_val == NULL) {
             fprintf(stderr, "Unknown Config %s\n", s8_to_cstr(scratch, arg->str));
             return;
@@ -537,7 +509,7 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         total_size += strlen("master_repl_offset:") + 20 + 1; // offset info + \n
         total_size += 1;                                      // null terminator
 
-        char *content = new (scratch, byte, total_size);
+        char *content = new (scratch, char, total_size);
         int   offset  = 0;
 
         offset += sprintf(content + offset, "role:%s\n",
@@ -598,6 +570,14 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
             char *items[3] = {"REPLCONF", "ACK", offset_str};
             s8    resp     = serde_array(scratch, items, 3);
             write_response(c_context, &resp);
+        } else if (s8equals_nocase(arg->str, S("ACK"))) {
+            DEBUG_LOG("processing ACK from replica");
+            WaitState *wait_state = &sv_context->wait_state;
+            i64 offset = s8to_i64(((BulkString *) ((RespArray *) element.val)->elts[2]->val)->str);
+            if (offset == wait_state->repl_offset + 37 || (offset == wait_state->repl_offset)) {
+                wait_state->synced_count++;
+                DEBUG_LOG("Found a synced replica");
+            }
         } else {
             UNREACHABLE();
         }
@@ -611,18 +591,25 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         BulkString *arg2 = (BulkString *) arg2_val->val;
 
         if (s8equals_nocase(arg1->str, S("?")) && s8equals_nocase(arg2->str, S("-1"))) {
-            char response[100];
-            sprintf(response, "+FULLRESYNC %s 0\r\n", sv_context->config->master_replid);
-            s8 resp_s8 = (s8) {.len = strlen(response), .data = (u8 *) response};
-            write_response(c_context, &resp_s8);
+            s8    replid     = sv_context->config->master_replid;
+            s8    fullresync = S("+FULLRESYNC ");
+            s8    end        = S(" 0\r\n");
+            char *response   = new (scratch, char, fullresync.len + end.len + replid.len);
+            memcpy(response, fullresync.data, fullresync.len);
+            i64 offset = fullresync.len;
+            memcpy(response + offset, replid.data, replid.len);
+            offset += replid.len;
+            memcpy(response + offset, end.data, end.len);
+            s8 resp_s8 = (s8) {.len = fullresync.len + end.len + replid.len, .data = response};
 
+            write_response(c_context, &resp_s8);
             c_context->replica->handskahe_done = h_done;
             c_context->replica->conn_fd        = ctx->conn_fd;
             c_context->replica->conn_id        = ctx->conn_id;
             push_vec(sv_context->replicas, c_context->replica);
 
             // transfer rdb
-            char  *rdbContent = new (scratch, byte, 1024);
+            char  *rdbContent = new (scratch, char, 1024);
             char  *hexString  = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469"
                                 "732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0"
                                 "c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
@@ -630,7 +617,7 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
             for (size_t i = 0; i < len; i += 2) {
                 sscanf(hexString + i, "%2hhx", &rdbContent[i / 2]);
             }
-            char *result = new (scratch, byte, 1024);
+            char *result = new (scratch, char, 1024);
             snprintf(result, 1024, "$%lu\r\n%s", strlen(rdbContent), rdbContent);
             len = strlen(result);
             fprintf(stderr, "DEBUGPRINT[22]: server.c:550: len=%zu\n", len);
@@ -642,66 +629,36 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
 
     } else if (s8equals_nocase(command->str, S("wait")) == true) {
         Element *arg1_val   = resp_array->elts[1];
-        int      wait_count = s8tof64(((BulkString *) arg1_val->val)->str);
-        int      timeout    = 0;
+        i32      wait_count = (i32) s8to_i64(((BulkString *) arg1_val->val)->str);
+        i64      timeout    = 0;
         if (resp_array->count >= 2) {
             void *arg2_val = resp_array->elts[2]->val;
-            timeout        = s8tof64(((BulkString *) arg2_val)->str);
+            timeout        = s8to_i64(((BulkString *) arg2_val)->str);
         }
-        DBG(wait_count, d);
-        DBG(timeout, d);
-        int replica_count = sv_context->replicas->total;
-        DBG(replica_count, d);
-        int synced_replicas = 0;
-
-        DBG(sv_context->config->master_repl_offset, d);
         if (sv_context->config->master_repl_offset == 0) {
-            s8 response = serde_int(c_context->perm, replica_count);
+            s8 response = serde_int(c_context->perm, sv_context->replicas->total);
             write_response(c_context, &response);
             return;
         }
-        // Create and launch threads
-        pthread_t threads[MAX_CLIENTS];
-        int       thread_count = 0;
-
-        // Launch threads
+        char *items[3] = {"REPLCONF", "GETACK", "*"};
+        s8    req      = serde_array(&ctx->temp, items, 3);
         for (int i = 0; i < sv_context->replicas->total; i++) {
             ReplicaConfig *replica = get_vec(sv_context->replicas, i);
             ClientContext *replica_context =
                 &sv_context->connections->client_contexts[replica->conn_id];
-            WaitData *data     = malloc(sizeof(WaitData));
-            data->conn_fd      = replica_context->conn_fd;
-            data->perm         = ctx->perm;
-            data->replica_id   = i;
-            data->repl_offset  = sv_context->config->master_repl_offset;
-            data->synced_count = &synced_replicas;
-            data->timeout      = timeout;
-
-            if (pthread_create(&threads[i], NULL, send_to_replica, data) != 0) {
-                fprintf(stderr, "Failed to create thread for replica %d\n", i);
-                free(data);
-                continue;
-            }
-            thread_count++;
+            write_response(replica_context, &req);
+            replica_context->want_write = 1;
         }
 
-        // Wait for threads with timeout
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec += timeout / 1000;
-        ts.tv_nsec += (timeout % 1000) * 1000000;
-        if (ts.tv_nsec >= 1000000000) {
-            ts.tv_sec += 1;
-            ts.tv_nsec -= 1000000000;
-        }
+        WaitState wait = (WaitState) {
+            .deadline       = get_current_time() + timeout,
+            .num_waiting    = wait_count,
+            .synced_count   = 0,
+            .client_conn_id = c_context->conn_id,
+            .repl_offset    = sv_context->config->master_repl_offset,
+        };
+        sv_context->wait_state = wait; // Only one wait at any given time is possible
 
-        // Wait for all threads to complete
-        for (int i = 0; i < thread_count; i++) {
-            pthread_join(threads[i], NULL);
-        }
-
-        s8 response = serde_int(c_context->perm, synced_replicas);
-        write_response(c_context, &response);
     } else {
         printf("Unknown request type\n");
     }
@@ -712,7 +669,7 @@ int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
-    Arena arena = newarena(10000 * 1024);
+    Arena arena = newarena(1000000 * 1024);
 
     Config *config = new (&arena, Config);
     *config        = (Config) {
@@ -734,13 +691,11 @@ int main(int argc, char *argv[]) {
                     perror("Could not open directory passed to -dir");
                 }
                 closedir(dp);
-                config->dir = new (&arena, char, strlength(flag_val));
-                strcpy(config->dir, flag_val);
+                config->dir = s8_from_cstr(&arena, flag_val);
             }
             if (strcmp(flag_name, "--dbfilename") == 0) {
                 char *flag_val     = argv[++i];
-                config->dbfilename = new (&arena, char, strlength(flag_val));
-                strcpy(config->dbfilename, flag_val);
+                config->dbfilename = s8_from_cstr(&arena, flag_val);
             }
             if (strcmp(flag_name, "--test-rdb") == 0) {
                 print_rdb_and_exit = 1;
@@ -769,19 +724,27 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    config->master_replid      = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+    config->master_replid      = S("8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb");
     config->master_repl_offset = 0;
 
     print_config(config);
 
     HashMap *hashmap = 0;
 
-    if (config->dir && config->dbfilename) {
-        char full_path[MAX_PATH];
-        snprintf(full_path, sizeof(full_path), "%s%s%s", config->dir, "/", config->dbfilename);
-        RdbContent *rdb = parse_rdb(&arena, full_path);
+    if (config->dir.len && config->dbfilename.len) {
+        usize path_size = config->dir.len + config->dbfilename.len + 1;
+        Arena scratch   = newarena(1000 * 1024);
+        s8    full_path = {.len = path_size, .data = new (&scratch, u8, path_size)};
+        memcpy(full_path.data, config->dir.data, config->dir.len);
+        size pos            = config->dir.len + 1;
+        full_path.data[pos] = '/';
+        pos++;
+        memcpy(full_path.data + pos, config->dbfilename.data, config->dbfilename.len);
+        RdbContent *rdb = parse_rdb(&arena, &scratch, full_path);
+        droparena(&scratch);
         if (rdb != NULL) {
-            RdbDatabase *db = (RdbDatabase *) rdb->databases->items[0];
+            // TODO: something not right
+            RdbDatabase *db = (RdbDatabase *) rdb->database;
             hashmap         = db->data;
         }
         if (print_rdb_and_exit) {
@@ -823,13 +786,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Waiting for a client to connect...\n");
+    printf("Server started\n");
 
-    client_addr_len      = sizeof(client_addr);
+    client_addr_len = sizeof(client_addr);
+    // TODO: when a replica disconnects remove it.
     vector     *replicas = initialize_vec();
     Connections conns    = {
-           .poll_fds        = malloc(sizeof(struct pollfd) * 5),
-           .client_contexts = malloc(sizeof(ClientContext) * 5),
+           .poll_fds        = malloc(sizeof(struct pollfd) * MAX_CLIENTS),
+           .client_contexts = malloc(sizeof(ClientContext) * MAX_CLIENTS),
            .count           = 0,
            .size            = MAX_CLIENTS,
     };
@@ -869,7 +833,7 @@ int main(int argc, char *argv[]) {
     }
 
     while (1) {
-        int poll_count = poll(conns.poll_fds, conns.count, 1000);
+        int poll_count = poll(conns.poll_fds, conns.count, 10);
 
         if (poll_count < 0 && errno == EINTR) {
             continue;
@@ -886,7 +850,11 @@ int main(int argc, char *argv[]) {
             if ((ready & POLLERR) || conn->want_close) {
                 DBG_F("client %d removed\n", conn->conn_fd);
                 del_connection(&conns, i);
-            } else if (ready & POLLOUT) {
+                i--;
+                continue;
+            }
+
+            if (pfd->revents & POLLOUT) {
                 int result = send_writes(pfd->fd, &conn->writer);
                 DBG_F("write response result %d\n", result);
                 switch (result) {
@@ -903,7 +871,9 @@ int main(int argc, char *argv[]) {
                 default:
                     UNREACHABLE();
                 }
-            } else if (ready & POLLIN) {
+            }
+
+            if (pfd->revents & POLLIN) {
                 append_read_buf(&conn->reader);
                 switch (conn->reader.status) {
                 case 0:
@@ -913,7 +883,7 @@ int main(int argc, char *argv[]) {
                 }
 
                 while (conn->reader.length > 0) {
-                    Request request = try_parse_request(&arena, &conn->reader);
+                    Request request = try_parse_request(&conn->temp, &conn->reader);
                     if (request.empty) {
                         break;
                     }
@@ -925,19 +895,15 @@ int main(int argc, char *argv[]) {
                         conn->want_read     = 0;
                         conn->want_write    = 1;
                     }
+                    // Temp arena is reset after the request is handled
+                    Arena temp_arena_bu = conn->temp;
                     if (conn->is_connection_to_master) {
                         handle_master_request(&sv_context, conn, request);
                     } else {
                         handle_request(&sv_context, conn, request);
                     }
+                    conn->temp = temp_arena_bu;
                 }
-            }
-        }
-
-        for (int i = 0; i < conns.count; i++) {
-            ClientContext *conn = &conns.client_contexts[i];
-            if (conn->want_close) {
-                del_connection(&conns, i);
             }
         }
 
@@ -956,12 +922,26 @@ int main(int argc, char *argv[]) {
             }
             ClientContext *conn = &conns.client_contexts[i];
             pfd->events         = POLLERR;
+            if (conn->want_close) {
+                continue;
+            }
             if (conn->want_read) {
                 pfd->events |= POLLIN;
             }
             if (conn->want_write) {
                 pfd->events |= POLLOUT;
             }
+        }
+
+        // Handle wait_state (if any)
+        if (sv_context.wait_state.num_waiting &&
+            sv_context.wait_state.deadline < get_current_time()) {
+            ClientContext *client_context =
+                &conns.client_contexts[sv_context.wait_state.client_conn_id];
+            s8 response = serde_int(&client_context->temp, sv_context.wait_state.synced_count);
+            write_response(client_context, &response);
+            client_context->want_write = 1;
+            sv_context.wait_state      = (WaitState) {0};
         }
     }
 

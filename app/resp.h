@@ -99,4 +99,5 @@ s8 serde_array(Arena *arena, char **items, int item_len);
 s8 serde_int(Arena *arena, int val);
 
 void append_read_buf(BufferReader *);
+int insert_number(Arena *arena, char *dest, int len, int start_pos);
 #endif

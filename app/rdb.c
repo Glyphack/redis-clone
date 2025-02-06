@@ -21,7 +21,7 @@ u8 *read_source_file(Arena *arena, FILE *fp) {
     if (!data)
         goto ret;
 
-    int rd = fread(data, sizeof(u8), st.st_size, fp);
+    i64 rd = fread(data, sizeof(u8), st.st_size, fp);
     if (rd != st.st_size) {
         data = NULL;
         goto ret;
@@ -87,7 +87,7 @@ int parse_rdb_len_encoding(u8 **cursor, int *special_format) {
         // Mask the lower 6 bits of byte1 (0x3F = 00111111 in binary)
         // Then shift them left by 8 bits, leaving room for the next 8 bits from
         // byte2.
-        uint16_t combined = ((uint16_t) (byte1 & 0x3F) << 8) | byte2;
+        uint16_t combined = (uint16_t) ((byte1 & 0x3F) << 8) | byte2;
         len               = (int) combined;
     }
     // Discard the remaining 6 bits. The next 4 bytes from the stream represent
@@ -167,29 +167,27 @@ void print_rdb(const RdbContent *rdb) {
         print_rdb_value((AuxValue *) rdb->metadata->items[i]);
     }
 
-    printf("databases\n");
-    for (int i = 0; i < rdb->databases->total; i++) {
-        RdbDatabase *db = (RdbDatabase *) rdb->databases->items[i];
-        printf("database number: %d\n", db->num);
-        printf("hash size: %d\n", db->resizedb_hash);
-        printf("expiry size: %d\n", db->resizedb_expiry);
-        hashmap_print(db->data);
-    }
+    printf("database\n");
+    RdbDatabase *db = (RdbDatabase *) rdb->database;
+    printf("database number: %d\n", db->num);
+    printf("hash size: %d\n", db->resizedb_hash);
+    printf("expiry size: %d\n", db->resizedb_expiry);
+    hashmap_print(db->data);
 }
 
 // TODO: arena for RDB information like header, fields, etc. should be different than the arena used
 // for hashmap since that's long lived.
-RdbContent *parse_rdb(Arena *arena, char *path) {
-    RdbContent *rdbContent = new (arena, RdbContent);
+RdbContent *parse_rdb(Arena *perm, Arena *scratch, s8 path) {
+    RdbContent *rdbContent = new (perm, RdbContent);
     rdbContent->metadata   = initialize_vec();
 
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = fopen((char *) path.data, "rb");
     if (fp == NULL) {
-        printf("opening file: %s\n", path);
         perror("Error opening file");
+        s8print(path);
         return NULL;
     }
-    u8 *content = read_source_file(arena, fp);
+    u8 *content = read_source_file(scratch, fp);
     if (content == NULL) {
         fclose(fp);
         return NULL;
@@ -217,8 +215,8 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
         }
         if (1 == section_number) {
             while (*p != 0xFE) {
-                AuxValue *name  = new (arena, AuxValue);
-                AuxValue *value = new (arena, AuxValue);
+                AuxValue *name  = new (perm, AuxValue);
+                AuxValue *value = new (perm, AuxValue);
 
                 int special_format;
                 int len = parse_rdb_len_encoding(&p, &special_format);
@@ -254,9 +252,8 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
         }
 
         if (2 == section_number) {
-            rdbContent->databases = initialize_vec();
-            RdbDatabase *rdb_db   = new (arena, RdbDatabase);
-            rdb_db->data          = 0;
+            RdbDatabase *rdb_db = new (perm, RdbDatabase);
+            rdb_db->data        = 0;
             int special_format;
             int db_num = parse_rdb_len_encoding(&p, &special_format);
             if (special_format != -1) {
@@ -299,7 +296,7 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
                 int value_type = (int) *p;
                 p++;
 
-                HashMapNode *node = new (arena, HashMapNode);
+                HashMapNode *node = new (perm, HashMapNode);
                 switch (value_type) {
                 case 0:; // cannot define after case
                     AuxValue key, value;
@@ -315,8 +312,8 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
                         UNREACHABLE();
                     }
                     parse_len_encoded_string(&p, len, &value);
-                    node->key = s8malloc(key.value.str_value);
-                    node->val = s8malloc(value.value.str_value);
+                    node->key = key.value.str_value;
+                    node->val = value.value.str_value;
                     break;
                 default:
                     UNREACHABLE();
@@ -338,16 +335,15 @@ RdbContent *parse_rdb(Arena *arena, char *path) {
                     UNREACHABLE();
                     break;
                 }
-
-                hashmap_upsert(&rdb_db->data, arena, node);
+                hashmap_upsert(&rdb_db->data, perm, node);
             }
 
-            push_vec(rdbContent->databases, rdb_db);
+            rdbContent->database = rdb_db;
 
             if (*p == 0xFE) {
+                printf("Only one DB supported");
                 UNREACHABLE();
             }
-
             if (*p == 0xFF) {
                 section_number++;
             }

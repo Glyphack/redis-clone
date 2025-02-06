@@ -22,10 +22,11 @@ typedef struct RdbDatabase {
 typedef struct RdbContent {
   s8 header;
   vector *metadata;
-  vector *databases;
+  // Only one DB supported
+  RdbDatabase *database;
 } RdbContent;
 
-RdbContent *parse_rdb(Arena *, char *);
+RdbContent *parse_rdb(Arena *, Arena *, s8);
 void print_rdb(const RdbContent*);
 
 #endif

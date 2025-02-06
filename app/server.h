@@ -8,7 +8,6 @@
 #include <netinet/in.h>
 
 #define RESPONSE_ITEM_MAX_SIZE 1024
-#define MAX_PATH 1024
 #define MAX_CLIENTS 100
 
 
@@ -19,11 +18,11 @@ typedef struct {
 } BufferWriter;
 
 typedef struct {
-    char* dir;
-    char* dbfilename;
+    s8 dir;
+    s8 dbfilename;
     int port;
     struct sockaddr_in* master_info;
-    char* master_replid;
+    s8 master_replid;
     int master_repl_offset;
 } Config;
 
@@ -50,9 +49,18 @@ typedef struct {
 } ReplicationContext;
 
 typedef struct {
+    i64 deadline;
+    i32 num_waiting;
+    i32 synced_count;
+    i32 client_conn_id;
+    i64 repl_offset;
+} WaitState;
+
+typedef struct {
     int conn_fd;
     int conn_id;
     Arena* perm;
+    Arena temp;
     HashMap** hashmap;
     int want_read;
     int want_write;
@@ -67,8 +75,8 @@ typedef struct {
 } ClientContext;
 
 typedef struct {
-    int count;
-    int size;
+    i32 count;
+    i32 size;
     struct pollfd *poll_fds;
     ClientContext *client_contexts;
 } Connections;
@@ -81,6 +89,8 @@ typedef struct {
     vector* replicas;
     // If this a connection to master for replication. Only replica
     ReplicationContext *replication_context;
+    // If a wait is running;
+    WaitState wait_state;
 } ServerContext;
 
 void* connection_handler(void* arg);
