@@ -781,7 +781,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (listen(server_fd, MAX_CLIENTS) != 0) {
+    if (listen(server_fd, 60) != 0) {
         fprintf(stderr, "Listen failed: %s \n", strerror(errno));
         return 1;
     }
@@ -835,6 +835,17 @@ int main(int argc, char *argv[]) {
     while (1) {
         int poll_count = poll(conns.poll_fds, conns.count, 10);
 
+        // Handle wait_state (if any)
+        if (sv_context.wait_state.num_waiting &&
+            sv_context.wait_state.deadline < get_current_time()) {
+            ClientContext *client_context =
+                &conns.client_contexts[sv_context.wait_state.client_conn_id];
+            s8 response = serde_int(&client_context->temp, sv_context.wait_state.synced_count);
+            write_response(client_context, &response);
+            client_context->want_write = 1;
+            sv_context.wait_state      = (WaitState) {0};
+        }
+
         if (poll_count < 0 && errno == EINTR) {
             continue;
         }
@@ -883,8 +894,10 @@ int main(int argc, char *argv[]) {
                 }
 
                 while (conn->reader.length > 0) {
-                    Request request = try_parse_request(&conn->temp, &conn->reader);
+                    Arena   temp_arena_bu = conn->temp;
+                    Request request       = try_parse_request(&conn->temp, &conn->reader);
                     if (request.empty) {
+                        conn->temp = temp_arena_bu;
                         break;
                     }
                     printf("read request from client %d\n", pfd->fd);
@@ -896,7 +909,6 @@ int main(int argc, char *argv[]) {
                         conn->want_write    = 1;
                     }
                     // Temp arena is reset after the request is handled
-                    Arena temp_arena_bu = conn->temp;
                     if (conn->is_connection_to_master) {
                         handle_master_request(&sv_context, conn, request);
                     } else {
@@ -931,17 +943,6 @@ int main(int argc, char *argv[]) {
             if (conn->want_write) {
                 pfd->events |= POLLOUT;
             }
-        }
-
-        // Handle wait_state (if any)
-        if (sv_context.wait_state.num_waiting &&
-            sv_context.wait_state.deadline < get_current_time()) {
-            ClientContext *client_context =
-                &conns.client_contexts[sv_context.wait_state.client_conn_id];
-            s8 response = serde_int(&client_context->temp, sv_context.wait_state.synced_count);
-            write_response(client_context, &response);
-            client_context->want_write = 1;
-            sv_context.wait_state      = (WaitState) {0};
         }
     }
 
