@@ -6,6 +6,7 @@
 #include "resp.h"
 #include "vec.h"
 #include <netinet/in.h>
+#include <sys/event.h>
 
 #define RESPONSE_ITEM_MAX_SIZE 1024
 #define MAX_CLIENTS 100
@@ -77,7 +78,8 @@ typedef struct {
 typedef struct {
     i32 count;
     i32 size;
-    struct pollfd *poll_fds;
+    int kq;  // kqueue file descriptor
+    struct kevent *events;  // array of kevent structures
     ClientContext *client_contexts;
 } Connections;
 
