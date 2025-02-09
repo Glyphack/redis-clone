@@ -831,7 +831,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (listen(server_fd, 60) != 0) {
+    if (listen(server_fd, MAX_CLIENTS) != 0) {
         fprintf(stderr, "Listen failed: %s \n", strerror(errno));
         return 1;
     }
@@ -949,7 +949,7 @@ int main(int argc, char *argv[]) {
                     perror("accept");
                 } else {
                     add_client(&arena, &sv_context, &conns, new_fd);
-                    printf("Client %d connected\n", new_fd);
+                    DBG_F("Client %d connected\n", new_fd);
                 }
                 continue;
             }
@@ -970,7 +970,7 @@ int main(int argc, char *argv[]) {
                         conn->temp = temp_arena_bu;
                         break;
                     }
-                    printf("read request from client %d\n", fd);
+                    DBG_F("read request from client %d\n", fd);
 
                     if (conn->reader.cursor == conn->reader.length) {
                         conn->reader.cursor = 0;

@@ -9,7 +9,7 @@
 #include <sys/event.h>
 
 #define RESPONSE_ITEM_MAX_SIZE 1024
-#define MAX_CLIENTS 100
+#define MAX_CLIENTS 1100
 
 
 typedef struct {
