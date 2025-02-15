@@ -56,7 +56,7 @@ u8 getNextChar(BufferReader *buffer) {
 }
 
 u8 peekChar(BufferReader *buffer) {
-    int cursor     = buffer->cursor;
+    int cursor     = (int) buffer->cursor;
     u8  curr       = getNextChar(buffer);
     buffer->cursor = cursor;
     return curr;
@@ -292,7 +292,7 @@ s8 serde_bulk_str(Arena *arena, s8 str) {
     s8  response         = (s8) {.len = len, .data = new (arena, u8, len)};
     int pos              = 0;
     response.data[pos++] = '$';
-    pos                  = insert_number(arena, (char *) response.data, str.len, pos);
+    pos                  = insert_number(arena, (char *) response.data, (int) str.len, pos);
 
     response.data[pos++] = '\r';
     response.data[pos++] = '\n';

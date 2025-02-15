@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.13)
 # )
 
 set(CMAKE_C_FLAGS
-    "${CMAKE_C_FLAGS} -march=native -m64 -O3 -Wall -Wextra -Wconversion -Wno-incompatible-pointer-types-discards-qualifiers -Wno-pointer-sign -Wno-sign-conversion -Wdouble-promotion -Wvla"
+    "${CMAKE_C_FLAGS} -march=native -m64 -O3 -flto -Wall -Wextra -Wconversion -Wno-incompatible-pointer-types-discards-qualifiers -Wno-pointer-sign -Wno-sign-conversion -Wdouble-promotion -Wvla"
 )
 add_definitions(-DNODEBUG)
 
