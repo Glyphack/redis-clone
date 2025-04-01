@@ -9,7 +9,6 @@ typedef struct {
     s8 key;
     s8 val;
     long long ttl;
-    u64 version;
 } HashMapNode;
 
 // Capacity 4^32

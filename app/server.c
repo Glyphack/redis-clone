@@ -679,11 +679,35 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         assert(command_val->type == BULK_STRING);
         BulkString *key = (BulkString *) command_val->val;
         HashMapNode node = hashmap_get(*ctx->hashmap, key->str);
-        if (node.key.len == 0) {
-            write_response(ctx, &none_resp);
+        if (node.key.len != 0) {
+            write_response(ctx, &string_resp);
             return;
         }
-        write_response(ctx, &string_resp);
+        s8print(sv_context->stream_key);
+        if (s8equals(key->str, sv_context->stream_key)) {
+            write_response(ctx, &stream_resp);
+            return;
+        }
+        write_response(ctx, &none_resp);
+        return;
+    } else if (s8equals_nocase(command->str, S("xadd")) == true) {
+        s8 stream_key = ((BulkString*) resp_array->elts[1]->val)->str;
+        s8print(stream_key);
+        s8 id = ((BulkString*) resp_array->elts[2]->val)->str;
+        HashMap* entry = new(ctx->perm, HashMap);
+        for (int i=3; i<resp_array->count;i+=2) {
+            s8 key = s8clone(ctx->perm, ((BulkString*) resp_array->elts[i]->val)->str);
+            assert(i+1<resp_array->count);
+            s8 val = ((BulkString*) resp_array->elts[i+1]->val)->str;
+            HashMapNode n = {.key = key, .val = val};
+            hashmap_upsert(&entry, ctx->perm, &n);
+        }
+
+        sv_context->stream_key = s8clone(ctx->perm, stream_key);
+        s8print(sv_context->stream_key);
+        s8 resp = serde_bulk_str(scratch, id);
+        write_response(ctx, &resp);
+        return;
     } else {
         printf("Unknown request type\n");
     }

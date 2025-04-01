@@ -91,6 +91,7 @@ typedef struct {
     ReplicationContext *replication_context;
     // If a wait is running;
     WaitState wait_state;
+    s8 stream_key;
 } ServerContext;
 
 void* connection_handler(void* arg);
