@@ -54,20 +54,21 @@ HashMapNode hashmap_get(HashMap *map, s8 key) {
     return (HashMapNode) {0};
 }
 
-void hashmap_keys(HashMap *h, vector *result) {
+void hashmap_keys(HashMap *h, Arena* arena, vector *result) {
     if (!h) {
         return;
     }
     if (h->node.key.len == 0) {
         return;
     }
-    char *key = malloc(h->node.key.len + 1);
-    memcpy(key, h->node.key.data, h->node.key.len);
-    key[h->node.key.len] = '\0';
+    s8 *key = new(arena, s8);
+    key->data = new(arena, u8, h->node.key.len);
+    memcpy(key->data, h->node.key.data, h->node.key.len);
+    key->len = h->node.key.len;
     push_vec(result, key);
     for (int i = 0; i < 4; i++) {
         if (h->children[i]) {
-            hashmap_keys((HashMap *) h->children[i], result);
+            hashmap_keys((HashMap *) h->children[i], arena, result);
         }
     }
 }
@@ -85,7 +86,7 @@ void hashmap_print(HashMap *h) {
     if (h == NULL) {
         return;
     }
-    printf("key: %s, val: %s exp: %lld\n", h->node.key.data, h->node.val.data, h->node.ttl);
+    printf("key: %.*s, val: %.*s exp: %lld\n", (int) h->node.key.len, h->node.key.data, (int) h->node.val.len, h->node.val.data, h->node.ttl);
     for (int i = 0; i < 4; i++) {
         hashmap_print((HashMap *) h->children[i]);
     }

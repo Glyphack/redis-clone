@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-s8 cstr_as_s8(const char *cstr) {
+s8 cstr_as_s8(char *cstr) {
     size len = strlen(cstr);
     s8   str;
     str.data = cstr;
@@ -16,9 +16,8 @@ s8 cstr_as_s8(const char *cstr) {
 s8 s8_from_cstr(Arena *arena, const char *cstr) {
     size len = strlen(cstr);
     s8   str;
-    str.data = new (arena, u8, len + 1);
+    str.data = new (arena, u8, len);
     memcpy(str.data, cstr, len);
-    str.data[len] = '\0';
     str.len       = len;
     return str;
 }

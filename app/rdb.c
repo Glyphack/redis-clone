@@ -3,6 +3,7 @@
 #include "hashmap.h"
 #include "str.h"
 #include "types.h"
+#include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,26 +11,50 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-u8 *read_source_file(Arena *arena, FILE *fp) {
-    u8         *data = NULL;
-    struct stat st;
-
-    if (fstat(fileno(fp), &st) == -1)
-        goto ret;
-
-    data = new (arena, u8, st.st_size + 1);
-    if (!data)
-        goto ret;
-
-    i64 rd = fread(data, sizeof(u8), st.st_size, fp);
-    if (rd != st.st_size) {
-        data = NULL;
-        goto ret;
+u8 *read_source_file(Arena *arena, char* path) {
+    FILE *fp = fopen(path, "rb");
+    printf("reading %s\n", path);
+    if (fp == NULL) {
+        perror("Error opening file");
+        return NULL;
     }
-    data[st.st_size] = '\0';
+    if (!arena || !fp) {
+        fprintf(stderr, "Error: Invalid arena or file pointer\n");
+        return NULL;
+    }
+    
+    struct stat file_stat;
+    if (fstat(fileno(fp), &file_stat) == -1) {
+        perror("Error: Could not determine file size");
+        return NULL;
+    }
+    
+    size_t file_size = file_stat.st_size;
+    u8 *buffer = new(arena, u8, file_size + 1);
+    if (!buffer) {
+        fprintf(stderr, "Error: Memory allocation failed for %zu bytes\n", file_size + 1);
+        return NULL;
+    }
+    
+    size_t bytes_read = fread(buffer, sizeof(u8), file_size, fp);
+    if (bytes_read != file_size) {
+        fprintf(stderr, "Error: File read failed. Expected %zu bytes, got %zu bytes\n", 
+                file_size, bytes_read);
+        if (ferror(fp)) {
+            perror("Read error");
+        }
+        if (feof(fp)) {
+            fprintf(stderr, "Unexpected EOF reached\n");
+        }
+        return NULL;
+    }
+    
+    // Add null terminator
+    buffer[file_size] = '\0';
 
-ret:
-    return data;
+    fclose(fp);
+    return buffer;
+
 }
 
 uint16_t read_little_endian_16(u8 *bytes) {
@@ -126,6 +151,7 @@ int parse_len_encoded_string(u8 **cursor, int size, AuxValue *aux_value) {
     }
     aux_value->value.str_value.data = (u8 *) p;
     aux_value->value.str_value.len  = size;
+    aux_value->type = AUX_TYPE_STRING;
     p                               = p + size;
     *cursor                         = p;
     return 0;
@@ -181,15 +207,8 @@ RdbContent *parse_rdb(Arena *perm, Arena *scratch, s8 path) {
     RdbContent *rdbContent = new (perm, RdbContent);
     rdbContent->metadata   = initialize_vec();
 
-    FILE *fp = fopen((char *) path.data, "rb");
-    if (fp == NULL) {
-        perror("Error opening file");
-        s8print(path);
-        return NULL;
-    }
-    u8 *content = read_source_file(scratch, fp);
+    u8 *content = read_source_file(perm, s8_to_cstr(scratch, path));
     if (content == NULL) {
-        fclose(fp);
         return NULL;
     }
     u8 *p = content;
@@ -232,7 +251,6 @@ RdbContent *parse_rdb(Arena *perm, Arena *scratch, s8 path) {
                 } else {
                     value->type = AUX_TYPE_INT;
                     int result  = parse_integer_encoded_as_string(&p, special_format);
-                    DBG(result, d);
                     value->value.int_value = result;
                 }
                 push_vec(rdbContent->metadata, value);
@@ -302,15 +320,11 @@ RdbContent *parse_rdb(Arena *perm, Arena *scratch, s8 path) {
                     AuxValue key, value;
                     int      sf, len;
                     len = parse_rdb_len_encoding(&p, &sf);
-                    if (sf != -1) {
-                        UNREACHABLE();
-                    }
+                    assert(sf == -1);
                     parse_len_encoded_string(&p, len, &key);
                     sf  = 0;
                     len = parse_rdb_len_encoding(&p, &sf);
-                    if (sf != -1) {
-                        UNREACHABLE();
-                    }
+                    assert(sf == -1);
                     parse_len_encoded_string(&p, len, &value);
                     node->key = key.value.str_value;
                     node->val = value.value.str_value;
@@ -355,6 +369,5 @@ RdbContent *parse_rdb(Arena *perm, Arena *scratch, s8 path) {
         p++;
     }
 
-    fclose(fp);
     return rdbContent;
 }

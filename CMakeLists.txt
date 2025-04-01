@@ -1,14 +1,14 @@
 cmake_minimum_required(VERSION 3.13)
 
 # debug build
-# set(CMAKE_C_FLAGS
-#     "${CMAKE_C_FLAGS} -march=native -m64 -Wall -Wextra -Wconversion -Wno-incompatible-pointer-types-discards-qualifiers -Wno-pointer-sign -Wno-sign-conversion -Wdouble-promotion -Wvla -fsanitize=undefined,thread -g3"
-# )
-
 set(CMAKE_C_FLAGS
-    "${CMAKE_C_FLAGS} -march=native -m64 -O3 -Wall -Wextra -Wconversion -Wno-incompatible-pointer-types-discards-qualifiers -Wno-pointer-sign -Wno-sign-conversion -Wdouble-promotion -Wvla"
+    "${CMAKE_C_FLAGS} -march=native -m64 -Wall -Wextra -Wconversion -Wno-incompatible-pointer-types-discards-qualifiers -Wno-pointer-sign -Wno-sign-conversion -Wdouble-promotion -Wvla -fsanitize=undefined,thread -g3"
 )
-add_definitions(-DNODEBUG)
+
+# set(CMAKE_C_FLAGS
+#     "${CMAKE_C_FLAGS} -march=native -m64 -O3 -Wall -Wextra -Wconversion -Wno-incompatible-pointer-types-discards-qualifiers -Wno-pointer-sign -Wno-sign-conversion -Wdouble-promotion -Wvla"
+# )
+# add_definitions(-DNODEBUG)
 
 project(redis)
 

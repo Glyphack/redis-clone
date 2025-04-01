@@ -330,11 +330,13 @@ s8 serde_array(Arena *arena, char **items, int item_len) {
 
     response.data[pos++] = '\r';
     response.data[pos++] = '\n';
+    fprintf(stdout, "DEBUGPRINT[1]: resp.c:324: item_len=%d\n", item_len);
 
     for (int i = 0; i < item_len; i++) {
         s8 item_formatted = serde_bulk_str(arena, cstr_as_s8(items[i]));
         memcpy(response.data + pos, item_formatted.data, item_formatted.len);
         pos += item_formatted.len;
+        printf("item %d processed\n", i);
     }
     response.len = pos;
     return response;
