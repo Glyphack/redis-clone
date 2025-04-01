@@ -693,13 +693,30 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
     } else if (s8equals_nocase(command->str, S("xadd")) == true) {
         s8 stream_key = ((BulkString*) resp_array->elts[1]->val)->str;
         s8print(stream_key);
-        s8 id = ((BulkString*) resp_array->elts[2]->val)->str;
+        s8 id_raw = ((BulkString*) resp_array->elts[2]->val)->str;
 
         char *ms_s, *seqn_s, *tptr;
-        ms_s = strtok_r(s8_to_cstr(&ctx->temp, id), "-" , &tptr);
-        i64 ms = atoi(ms_s);
+        i64 ms, seqn;
+        ms_s = strtok_r(s8_to_cstr(&ctx->temp, id_raw), "-" , &tptr);
         seqn_s = strtok_r(NULL, "-" , &tptr);
-        i32 seqn = atoi(seqn_s);
+
+        ms = atoi(ms_s);
+        DBG(ms, lld);
+
+        if (strcmp(seqn_s, "*") == 0) {
+            if (ms == 0) {
+                seqn = 1;
+            }
+            if (ms == sv_context->last_id_ms) {
+                seqn = sv_context->last_id_seqn + 1;
+            } else {
+                seqn = 0;
+            }
+        } else {
+            seqn = atoi(seqn_s);
+        }
+        DBG(seqn, lld);
+
         if (ms == 0 && seqn == 0) {
             write_response(ctx, &xadd_id_err_resp_0);
             return;
@@ -719,6 +736,24 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
             HashMapNode n = {.key = key, .val = val};
             hashmap_upsert(&entry, sv_context->perm, &n);
         }
+
+        i32 id_size = 0;
+        i64 ms_c = ms;
+        do {
+            id_size++;
+        } while(ms_c /= 10);
+        id_size++; // for -
+        i64 seqn_c = seqn;
+        do {
+            id_size++;
+        } while(seqn_c /= 10);
+
+        id_size++; // for null termination added by snprintf
+        DBG(id_size, d);
+        s8 id = {.len = id_size, .data= new(scratch, u8, id_size)};
+        snprintf(id.data, id_size, "%lld-%lld", ms, seqn);
+        DBG(id.data, s);
+        id.len--;
 
         sv_context->stream_key = s8clone(sv_context->perm, stream_key);
         s8print(sv_context->stream_key);
