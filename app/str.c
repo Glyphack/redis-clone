@@ -139,6 +139,11 @@ s8 s8concat(Arena *arena, s8 a, s8 b) {
     return result;
 }
 
+#ifdef NODEBUG
+void s8print(s8) {
+    return;
+}
+#else
 void s8print(s8 str) {
     putchar('\'');
     for (size i = 0; i < str.len; i++) {
@@ -158,6 +163,7 @@ void s8print(s8 str) {
     putchar('\'');
     putchar('\n');
 }
+#endif
 
 i64 s8to_i64(s8 str) {
     int num = 0;

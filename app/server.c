@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/event.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -78,6 +79,23 @@ int send_writes(int fd, BufferWriter *writer) {
     return 1; // Not finished
 }
 
+void update_events(int kq, int fd, int filter, int flags, void *udata) {
+    struct kevent ev;
+    EV_SET(&ev, fd, filter, flags, 0, 0, udata);
+    if (kevent(kq, &ev, 1, NULL, 0, NULL) == -1) {
+        perror("kevent");
+        exit(1);
+    }
+}
+
+// Batch update multiple events
+void update_events_batch(int kq, struct kevent *events, int nevents) {
+    if (kevent(kq, events, nevents, NULL, 0, NULL) == -1) {
+        perror("kevent batch");
+        exit(1);
+    }
+}
+
 int add_client(Arena *arena, ServerContext *sv_context, Connections *connections, int newfd) {
     if (connections->count == connections->size) {
         fprintf(stderr, "Max client limit (%d) reached. Cannot add more clients.\n",
@@ -87,19 +105,15 @@ int add_client(Arena *arena, ServerContext *sv_context, Connections *connections
     }
     fcntl(newfd, F_SETFL, fcntl(newfd, F_GETFL, 0) | O_NONBLOCK);
 
-    short event = POLLERR;
-    int   id    = connections->count;
-    if (id == 0) {
-        event |= POLLIN;
-    }
-    connections->poll_fds[id] = (struct pollfd) {.fd = newfd, .events = event, .revents = 0};
-    int          FULL_MEM     = 100 * 1024;
-    Arena        temp_arena   = newarena(FULL_MEM);
-    BufferWriter writer       = (BufferWriter) {
-              .cursor = 0,
-              .len    = 0,
-              .buffer = (s8) {.data = new (&temp_arena, u8, FULL_MEM / 10), .len = 1024},
+    int          id         = connections->count;
+    int          FULL_MEM   = 100 * 1024;
+    Arena        temp_arena = newarena(FULL_MEM);
+    BufferWriter writer     = (BufferWriter) {
+            .cursor = 0,
+            .len    = 0,
+            .buffer = (s8) {.data = new (&temp_arena, u8, FULL_MEM / 10), .len = 1024},
     };
+
     connections->client_contexts[id] = (ClientContext) {
         .conn_fd                 = newfd,
         .perm                    = arena,
@@ -111,18 +125,54 @@ int add_client(Arena *arena, ServerContext *sv_context, Connections *connections
         .want_write              = 0,
         .want_close              = 0,
         .is_connection_to_master = 0,
+        .conn_id                 = id,
     };
-    connections->client_contexts[id].conn_id = id;
+
+    // Batch event registration
+    struct kevent evs[2];
+    int           nevents = 0;
+
+    if (id == 0) {
+        // For server socket, only monitor read events
+        EV_SET(&evs[nevents++], newfd, EVFILT_READ, EV_ADD, 0, 0,
+               &connections->client_contexts[id]);
+    } else {
+        // For client sockets, monitor both read and write events initially
+        EV_SET(&evs[nevents++], newfd, EVFILT_READ, EV_ADD, 0, 0,
+               &connections->client_contexts[id]);
+        EV_SET(&evs[nevents++], newfd, EVFILT_WRITE, EV_ADD | EV_DISABLE, 0, 0,
+               &connections->client_contexts[id]);
+    }
+
+    update_events_batch(connections->kq, evs, nevents);
     connections->count++;
     return id;
 }
 
 void del_connection(Connections *connections, int i) {
     DBG_F("client %d removed\n", i);
-    ClientContext del_con = connections->client_contexts[i];
-    droparena(&del_con.temp);
-    connections->poll_fds[i]        = connections->poll_fds[connections->count - 1];
-    connections->client_contexts[i] = connections->client_contexts[connections->count - 1];
+    ClientContext *del_con = &connections->client_contexts[i];
+
+    // Batch delete events
+    struct kevent evs[2];
+    EV_SET(&evs[0], del_con->conn_fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    EV_SET(&evs[1], del_con->conn_fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    update_events_batch(connections->kq, evs, 2);
+
+    close(del_con->conn_fd);
+    droparena(&del_con->temp);
+
+    // Move the last client to this slot if not already the last
+    if (i < connections->count - 1) {
+        connections->client_contexts[i] = connections->client_contexts[connections->count - 1];
+        // Update events for the moved client to point to new location
+        struct kevent  evs[2];
+        ClientContext *moved = &connections->client_contexts[i];
+        EV_SET(&evs[0], moved->conn_fd, EVFILT_READ, EV_ADD, 0, 0, moved);
+        EV_SET(&evs[1], moved->conn_fd, EVFILT_WRITE, EV_ADD | (moved->want_write ? 0 : EV_DISABLE),
+               0, 0, moved);
+        update_events_batch(connections->kq, evs, 2);
+    }
     connections->count--;
 }
 
@@ -805,22 +855,31 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (listen(server_fd, 60) != 0) {
+    if (listen(server_fd, MAX_CLIENTS) != 0) {
         fprintf(stderr, "Listen failed: %s \n", strerror(errno));
         return 1;
     }
 
     printf("Server started\n");
 
-    client_addr_len = sizeof(client_addr);
-    // TODO: when a replica disconnects remove it.
-    vector     *replicas = initialize_vec();
-    Connections conns    = {
-           .poll_fds        = malloc(sizeof(struct pollfd) * MAX_CLIENTS),
-           .client_contexts = malloc(sizeof(ClientContext) * MAX_CLIENTS),
-           .count           = 0,
-           .size            = MAX_CLIENTS,
+    client_addr_len  = sizeof(client_addr);
+    vector *replicas = initialize_vec();
+
+    // Initialize kqueue
+    int kq = kqueue();
+    if (kq == -1) {
+        perror("kqueue");
+        return 1;
+    }
+
+    Connections conns = {
+        .count           = 0,
+        .size            = MAX_CLIENTS,
+        .kq              = kq,
+        .events          = malloc(sizeof(struct kevent) * MAX_CLIENTS),
+        .client_contexts = malloc(sizeof(ClientContext) * MAX_CLIENTS),
     };
+
     ServerContext sv_context = {
         .hashmap     = &hashmap,
         .config      = config,
@@ -828,6 +887,7 @@ int main(int argc, char *argv[]) {
         .replicas    = replicas,
         .connections = &conns,
     };
+
     add_client(&arena, &sv_context, &conns, server_fd);
 
     if (config->master_info != NULL) {
@@ -849,16 +909,22 @@ int main(int argc, char *argv[]) {
         ClientContext *context           = &conns.client_contexts[id];
         context->is_connection_to_master = 1;
         sv_context.replication_context   = repl_context;
-        conns.poll_fds[id].events |= POLLOUT;
+
+        // Enable write events for master connection
+        update_events(kq, master_conn_fd, EVFILT_WRITE, EV_ENABLE, context);
+
         // write ping
         char *ping[1] = {"PING"};
         s8    request = serde_array(&arena, ping, 1);
         write_response(context, &request);
     }
 
-    while (1) {
-        int poll_count = poll(conns.poll_fds, conns.count, 10);
+    struct timespec timeout = {
+        .tv_sec  = 0,
+        .tv_nsec = 10000000 // 10ms
+    };
 
+    while (1) {
         // Handle wait_state (if any)
         if (sv_context.wait_state.num_waiting &&
             sv_context.wait_state.deadline < get_current_time()) {
@@ -867,48 +933,52 @@ int main(int argc, char *argv[]) {
             s8 response = serde_int(&client_context->temp, sv_context.wait_state.synced_count);
             write_response(client_context, &response);
             client_context->want_write = 1;
-            sv_context.wait_state      = (WaitState) {0};
+
+            struct kevent ev;
+            EV_SET(&ev, client_context->conn_fd, EVFILT_WRITE, EV_ENABLE, 0, 0, client_context);
+            update_events_batch(conns.kq, &ev, 1);
+
+            sv_context.wait_state = (WaitState) {0};
         }
 
-        if (poll_count < 0 && errno == EINTR) {
-            continue;
-        }
-        if (poll_count == -1) {
-            perror("poll");
-            abort();
+        int nev = kevent(kq, NULL, 0, conns.events, conns.size, &timeout);
+        if (nev < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("kevent");
+            break;
         }
 
-        for (int i = 1; i < conns.count; i++) {
-            uint32_t       ready = conns.poll_fds[i].revents;
-            ClientContext *conn  = &conns.client_contexts[i];
-            struct pollfd *pfd   = &conns.poll_fds[i];
-            if ((ready & POLLERR) || conn->want_close) {
-                DBG_F("client %d removed\n", conn->conn_fd);
-                del_connection(&conns, i);
-                i--;
+        for (int i = 0; i < nev; i++) {
+            struct kevent *ev = &conns.events[i];
+            int            fd = (int) ev->ident;
+
+            // Direct access to client context through udata
+            ClientContext *conn = (ClientContext *) ev->udata;
+            if (conn == NULL) {
+                fprintf(stderr, "No client context found for fd %d\n", fd);
                 continue;
             }
 
-            if (pfd->revents & POLLOUT) {
-                int result = send_writes(pfd->fd, &conn->writer);
-                DBG_F("write response result %d\n", result);
-                switch (result) {
-                case -1:
-                    conn->want_close = 1;
-                    break;
-                case 0:
-                    conn->want_write = 0;
-                    conn->want_read  = 1;
-                    break;
-                case 1:
-                    conn->want_write = 1;
-                    break;
-                default:
-                    UNREACHABLE();
-                }
+            if (ev->flags & EV_ERROR) {
+                fprintf(stderr, "Event error: %s\n", strerror(ev->data));
+                conn->want_close = 1;
             }
 
-            if (pfd->revents & POLLIN) {
+            if (fd == server_fd) {
+                // Handle new connection
+                int new_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
+                if (new_fd == -1) {
+                    perror("accept");
+                } else {
+                    add_client(&arena, &sv_context, &conns, new_fd);
+                    DBG_F("Client %d connected\n", new_fd);
+                }
+                continue;
+            }
+
+            if (ev->filter == EVFILT_READ) {
                 append_read_buf(&conn->reader);
                 switch (conn->reader.status) {
                 case 0:
@@ -924,15 +994,19 @@ int main(int argc, char *argv[]) {
                         conn->temp = temp_arena_bu;
                         break;
                     }
-                    printf("read request from client %d\n", pfd->fd);
-                    // if everything is read
+                    DBG_F("read request from client %d\n", fd);
+
                     if (conn->reader.cursor == conn->reader.length) {
                         conn->reader.cursor = 0;
                         conn->reader.length = 0;
-                        conn->want_read     = 0;
-                        conn->want_write    = 1;
+
+                        // Batch update read/write events
+                        struct kevent evs[2];
+                        EV_SET(&evs[0], fd, EVFILT_READ, EV_DISABLE, 0, 0, conn);
+                        EV_SET(&evs[1], fd, EVFILT_WRITE, EV_ENABLE, 0, 0, conn);
+                        update_events_batch(conns.kq, evs, 2);
                     }
-                    // Temp arena is reset after the request is handled
+
                     if (conn->is_connection_to_master) {
                         handle_master_request(&sv_context, conn, request);
                     } else {
@@ -942,37 +1016,49 @@ int main(int argc, char *argv[]) {
                     printf("handled request from client %d\n", pfd->fd);
                 }
             }
-        }
 
-        for (int i = 0; i < conns.count; i++) {
-            struct pollfd *pfd = &conns.poll_fds[i];
-            if (pfd->fd == server_fd && pfd->revents) {
-                int new_fd = accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
-                if (new_fd == -1) {
-                    perror("accept");
-                    continue;
-                } else {
-                    add_client(&arena, &sv_context, &conns, new_fd);
-                    printf("Client %d connected\n", new_fd);
+            if (ev->filter == EVFILT_WRITE) {
+                int result = send_writes(fd, &conn->writer);
+                DBG_F("write response result %d\n", result);
+                switch (result) {
+                case -1:
+                    conn->want_close = 1;
+                    break;
+                case 0:
+                    // Batch update read/write events
+                    struct kevent evs[2];
+                    EV_SET(&evs[0], fd, EVFILT_WRITE, EV_DISABLE, 0, 0, conn);
+                    EV_SET(&evs[1], fd, EVFILT_READ, EV_ENABLE, 0, 0, conn);
+                    update_events_batch(conns.kq, evs, 2);
+                    break;
+                case 1:
+                    // Keep write events enabled
+                    break;
+                default:
+                    UNREACHABLE();
                 }
-                continue;
             }
-            ClientContext *conn = &conns.client_contexts[i];
-            pfd->events         = POLLERR;
+
             if (conn->want_close) {
-                continue;
-            }
-            if (conn->want_read) {
-                pfd->events |= POLLIN;
-            }
-            if (conn->want_write) {
-                pfd->events |= POLLOUT;
+                // Find the index of this connection
+                int idx;
+                for (idx = 0; idx < conns.count; idx++) {
+                    if (&conns.client_contexts[idx] == conn)
+                        break;
+                }
+                if (idx < conns.count) {
+                    del_connection(&conns, idx);
+                }
             }
         }
     }
 
+    // Cleanup
+    close(kq);
+    free(conns.events);
+    free(conns.client_contexts);
     for (int i = 0; i < conns.count; i++) {
-        close(conns.poll_fds[i].fd);
+        close(conns.client_contexts[i].conn_fd);
     }
     return 0;
 }
