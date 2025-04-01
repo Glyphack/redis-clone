@@ -697,33 +697,39 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
 
         char *ms_s, *seqn_s, *tptr;
         i64 ms, seqn;
-        ms_s = strtok_r(s8_to_cstr(&ctx->temp, id_raw), "-" , &tptr);
-        seqn_s = strtok_r(NULL, "-" , &tptr);
 
-        ms = atoi(ms_s);
-        DBG(ms, lld);
-
-        if (strcmp(seqn_s, "*") == 0) {
-            if (ms == 0) {
-                seqn = 1;
-            }
-            if (ms == sv_context->last_id_ms) {
-                seqn = sv_context->last_id_seqn + 1;
-            } else {
-                seqn = 0;
-            }
+        if(s8equals(id_raw, S("*"))) {
+            ms = get_current_time();
+            seqn = 0;
         } else {
-            seqn = atoi(seqn_s);
-        }
-        DBG(seqn, lld);
+            ms_s = strtok_r(s8_to_cstr(&ctx->temp, id_raw), "-" , &tptr);
+            seqn_s = strtok_r(NULL, "-" , &tptr);
 
-        if (ms == 0 && seqn == 0) {
-            write_response(ctx, &xadd_id_err_resp_0);
-            return;
-        }
-        if (ms < sv_context->last_id_ms || (ms == sv_context->last_id_ms && seqn <= sv_context->last_id_seqn)) {
-            write_response(ctx, &xadd_id_err_resp);
-            return;
+            ms = atoi(ms_s);
+            DBG(ms, lld);
+
+            if (strcmp(seqn_s, "*") == 0) {
+                if (ms == 0) {
+                    seqn = 1;
+                }
+                if (ms == sv_context->last_id_ms) {
+                    seqn = sv_context->last_id_seqn + 1;
+                } else {
+                    seqn = 0;
+                }
+            } else {
+                seqn = atoi(seqn_s);
+            }
+            DBG(seqn, lld);
+
+            if (ms == 0 && seqn == 0) {
+                write_response(ctx, &xadd_id_err_resp_0);
+                return;
+            }
+            if (ms < sv_context->last_id_ms || (ms == sv_context->last_id_ms && seqn <= sv_context->last_id_seqn)) {
+                write_response(ctx, &xadd_id_err_resp);
+                return;
+            }
         }
         sv_context->last_id_seqn = seqn;
         sv_context->last_id_ms = ms;
