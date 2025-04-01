@@ -13,6 +13,8 @@ static s8 pong_resp = S("+PONG\r\n");
 static s8 string_resp = S("+string\r\n");
 static s8 stream_resp = S("+stream\r\n");
 static s8 none_resp = S("+none\r\n");
+static s8 xadd_id_err_resp = S("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
+static s8 xadd_id_err_resp_0 = S("-ERR The ID specified in XADD must be greater than 0-0\r\n");
 
 // Error codes for RESP parsing
 typedef enum RespError {

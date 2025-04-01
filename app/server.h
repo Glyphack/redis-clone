@@ -4,6 +4,7 @@
 #include "arena.h"
 #include "hashmap.h"
 #include "resp.h"
+#include "types.h"
 #include "vec.h"
 #include <netinet/in.h>
 
@@ -91,7 +92,11 @@ typedef struct {
     ReplicationContext *replication_context;
     // If a wait is running;
     WaitState wait_state;
+
+    // streams
     s8 stream_key;
+    i64 last_id_ms;
+    i32 last_id_seqn;
 } ServerContext;
 
 void* connection_handler(void* arg);
