@@ -10,6 +10,8 @@
 static s8 null_resp = S("$-1\r\n");
 static s8 ok_resp = S("+OK\r\n");
 static s8 pong_resp = S("+PONG\r\n");
+static s8 string_resp = S("+string\r\n");
+static s8 none_resp = S("+none\r\n");
 
 // Error codes for RESP parsing
 typedef enum RespError {

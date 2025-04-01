@@ -30,7 +30,7 @@ static const unsigned char upper_to_lower[256] = {
 };
 s8 s8_from_cstr(Arena *arena, const char *);
 char *s8_to_cstr(Arena *arena, s8 );
-s8 cstr_as_s8(const char *cstr);
+s8 cstr_as_s8(char *cstr);
 
 s8   s8span(u8 *, u8 *); 
 b32  s8equals(s8, s8);

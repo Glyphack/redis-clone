@@ -1,13 +1,15 @@
 #include "arena.h"
 #include "stdlib.h"
 #include "types.h"
-#include <execinfo.h>
+
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
-#define MAX_FRAMES 100
 
+#if __APPLE__
+#define MAX_FRAMES 100
+#include <execinfo.h>
 void print_stacktrace() {
     void  *buffer[MAX_FRAMES];
     int    nptrs   = backtrace(buffer, MAX_FRAMES);
@@ -23,6 +25,9 @@ void print_stacktrace() {
     }
     free(strings);
 }
+#else
+void print_stacktrace() {}
+#endif
 
 Arena newarena(size cap) {
     Arena a  = {0};

@@ -25,7 +25,7 @@ typedef struct HashMap HashMap;
 void hashmap_upsert(HashMap**,Arena *, HashMapNode*);
 void hashmap_upsert_atomic(HashMap**,Arena *, HashMapNode*);
 HashMapNode hashmap_get(HashMap *, s8);
-void hashmap_keys(HashMap*, vector*);
+void hashmap_keys(HashMap*, Arena*, vector*);
 
 void hashmap_print(HashMap*);
 

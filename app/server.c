@@ -202,20 +202,28 @@ void print_config(Config *config) {
     }
 }
 
-void *getConfig(Config *config, s8 name) {
+typedef struct {
+    s8 val;
+    int not_found;
+} ConfigVal;
+
+ConfigVal getConfig(Config *config, s8 name) {
+    ConfigVal res = {.not_found = 0};
     if (s8equals(name, S("dir"))) {
-        return config->dir.data;
+        res.val = config->dir;
     }
-    if (s8equals(name, S("dbfilename"))) {
-        return config->dbfilename.data;
+    else if (s8equals(name, S("dbfilename"))) {
+        res.val = config->dbfilename;
     }
-    if (s8equals(name, S("appendonly"))) {
-        return "no"; // Explicitly disable AOF persistence
+    else if (s8equals(name, S("appendonly"))) {
+        res.val = S("no"); // Explicitly disable AOF persistence
     }
-    if (s8equals(name, S("save"))) {
-        return ""; // Empty string means RDB persistence is disabled
+    else if (s8equals(name, S("save"))) {
+        res.val = S(""); // Empty string means RDB persistence is disabled
+    } else {
+        res.not_found = 1;
     }
-    return NULL;
+    return res;
 }
 
 void handle_get(ClientContext *ctx, s8 key) {
@@ -506,19 +514,24 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
             return;
         }
         vector *keys = initialize_vec();
-        hashmap_keys(*ctx->hashmap, keys);
+        hashmap_keys(*ctx->hashmap, scratch, keys);
         if (keys->total == 0) {
             write_response(c_context, &null_resp);
             return;
         }
-        char *key_chars = new (scratch, char, keys->total);
+        char **key_chars = new (scratch, char*, keys->total);
         for (int i = 0; i < keys->total; i++) {
-            key_chars[i] = *(char *) keys->items[i];
+            s8 *key = (s8 *) keys->items[i];
+            s8print(*key);
+            key_chars[i] = s8_to_cstr(scratch, *key);
         }
+        printf("keys %d", keys->total);
+        s8 response = serde_array(scratch, key_chars, keys->total);
+        write_response(c_context, &response);
+        // TODO: vec is not using allocator
         free(keys->items);
         free(keys);
-        s8 response = serde_array(scratch, &key_chars, keys->total);
-        write_response(c_context, &response);
+        printf("here");
     } else if (s8equals_nocase(command->str, S("CONFIG")) == true) {
         assert(resp_array->count == 3);
         Element *get_val = resp_array->elts[1];
@@ -534,13 +547,14 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         assert(arg_val->type == BULK_STRING);
         BulkString *arg = (BulkString *) arg_val->val;
 
-        char *config_val = getConfig(sv_context->config, arg->str);
-        if (config_val == NULL) {
+        ConfigVal val = getConfig(sv_context->config, arg->str);
+        if (val.not_found == 1) {
             fprintf(stderr, "Unknown Config %s\n", s8_to_cstr(scratch, arg->str));
+            s8    response = serde_array(scratch, NULL, 0);
+            write_response(c_context, &response);
             return;
         }
-
-        char *resps[2] = {s8_to_cstr(scratch, arg->str), config_val};
+        char *resps[2] = {s8_to_cstr(scratch, arg->str), s8_to_cstr(scratch, val.val)};
         s8    response = serde_array(scratch, resps, 2);
         write_response(c_context, &response);
     } else if (s8equals_nocase(command->str, S("INFO")) == true) {
@@ -709,6 +723,17 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         };
         sv_context->wait_state = wait; // Only one wait at any given time is possible
 
+    } else if (s8equals_nocase(command->str, S("type")) == true) {
+        assert(resp_array->count == 2);
+        Element *command_val = resp_array->elts[1];
+        assert(command_val->type == BULK_STRING);
+        BulkString *key = (BulkString *) command_val->val;
+        HashMapNode node = hashmap_get(*ctx->hashmap, key->str);
+        if (node.key.len == 0) {
+            write_response(ctx, &none_resp);
+            return;
+        }
+        write_response(ctx, &string_resp);
     } else {
         printf("Unknown request type\n");
     }
@@ -779,28 +804,27 @@ int main(int argc, char *argv[]) {
 
     print_config(config);
 
-    HashMap *hashmap = 0;
+    HashMap* hashmap = new(&arena, HashMap);
 
     if (config->dir.len && config->dbfilename.len) {
         usize path_size = config->dir.len + config->dbfilename.len + 1;
         Arena scratch   = newarena(1000 * 1024);
         s8    full_path = {.len = path_size, .data = new (&scratch, u8, path_size)};
         memcpy(full_path.data, config->dir.data, config->dir.len);
-        size pos            = config->dir.len + 1;
+        size pos            = config->dir.len;
         full_path.data[pos] = '/';
         pos++;
         memcpy(full_path.data + pos, config->dbfilename.data, config->dbfilename.len);
         RdbContent *rdb = parse_rdb(&arena, &scratch, full_path);
-        droparena(&scratch);
         if (rdb != NULL) {
-            // TODO: something not right
             RdbDatabase *db = (RdbDatabase *) rdb->database;
-            hashmap         = db->data;
+            *hashmap         = *db->data;
         }
         if (print_rdb_and_exit) {
             print_rdb(rdb);
             exit(0);
         }
+        droparena(&scratch);
     }
 
     int                server_fd;
@@ -989,6 +1013,7 @@ int main(int argc, char *argv[]) {
                         handle_request(&sv_context, conn, request);
                     }
                     conn->temp = temp_arena_bu;
+                    printf("handled request from client %d\n", pfd->fd);
                 }
             }
 
