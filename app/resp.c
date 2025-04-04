@@ -320,7 +320,6 @@ s8 serde_int(Arena *arena, int val) {
     return str;
 }
 
-// TODO: use s8 instead of char**
 s8 serde_array(Arena *arena, char **items, int item_len) {
     size resp_len        = RESPONSE_ITEM_MAX_SIZE * item_len + item_len % 10 + 5;
     s8   response        = (s8) {.len = resp_len, .data = new (arena, u8, resp_len)};
@@ -330,14 +329,43 @@ s8 serde_array(Arena *arena, char **items, int item_len) {
 
     response.data[pos++] = '\r';
     response.data[pos++] = '\n';
-    fprintf(stdout, "DEBUGPRINT[1]: resp.c:324: item_len=%d\n", item_len);
 
     for (int i = 0; i < item_len; i++) {
         s8 item_formatted = serde_bulk_str(arena, cstr_as_s8(items[i]));
         memcpy(response.data + pos, item_formatted.data, item_formatted.len);
         pos += item_formatted.len;
-        printf("item %d processed\n", i);
     }
     response.len = pos;
     return response;
+}
+
+s8 serde(Arena *arena, Element element) {
+    switch (element.type) {
+        case ARRAY:
+                ;
+                RespArray *array = (RespArray*) element.val;
+                DBG(array->count, d);
+                size resp_len        = RESPONSE_ITEM_MAX_SIZE * array->count + array->count % 10 + 5;
+                s8   response        = (s8) {.len = resp_len, .data = new (arena, u8, resp_len)};
+                int  pos             = 0;
+                response.data[pos++] = '*';
+                pos                  = insert_number(arena, (char *) response.data, array->count, pos);
+                response.data[pos++] = '\r';
+                response.data[pos++] = '\n';
+                for (int i=0;i<array->count;i++) {
+                    Element *elm = array->elts[i];
+                    s8 elm_serde = serde(arena, *elm);
+                    memcpy(response.data + pos, elm_serde.data, elm_serde.len);
+                    pos += elm_serde.len;
+                }
+                return response;
+            break;
+        case BULK_STRING:
+                ;
+                BulkString *str = (BulkString*) element.val;
+                s8 res = serde_bulk_str(arena, str->str);
+                return res;
+        default:
+            UNREACHABLE();
+    }
 }

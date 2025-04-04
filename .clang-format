@@ -1,4 +1,4 @@
-Language: Cpp
+Language: C
 BasedOnStyle: LLVM
 IndentWidth: 4
 UseTab: Never
@@ -15,4 +15,4 @@ AlignConsecutiveAssignments: true
 AlignConsecutiveDeclarations: true
 AllowShortBlocksOnASingleLine: false
 SortIncludes: true
-IncludeBlocks: Preserve 
+IncludeBlocks: Preserve

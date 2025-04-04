@@ -27,6 +27,33 @@
 #include <time.h>
 #include <unistd.h>
 
+// returns hashmap items in a vector. Each key is followed by a value.
+void hashmap_items(HashMap *h, Arena *arena, vector *result) {
+    if (!h) {
+        return;
+    }
+    if (h->node.key.len == 0) {
+        return;
+    }
+    DEBUG_LOG("hashmap item");
+    s8 *key   = new (arena, s8);
+    key->data = new (arena, u8, h->node.key.len);
+    memcpy(key->data, h->node.key.data, h->node.key.len);
+    key->len = h->node.key.len;
+    push_vec(result, key);
+    s8 *val   = new (arena, s8);
+    val->data = new (arena, u8, h->node.val.len);
+    memcpy(val->data, h->node.val.data, h->node.val.len);
+    val->len = h->node.val.len;
+    DEBUG_LOG("end");
+    push_vec(result, val);
+    for (int i = 0; i < 4; i++) {
+        if (h->children[i]) {
+            hashmap_items((HashMap *) h->children[i], arena, result);
+        }
+    }
+}
+
 BufferReader buffered_reader(Arena *arena, int conn_fd) {
     int          capacity = 64 * 1024; // 64KB chunks
     char        *buf      = new (arena, char, capacity);
@@ -98,7 +125,7 @@ int add_client(Arena *arena, ServerContext *sv_context, Connections *connections
     BufferWriter writer       = (BufferWriter) {
               .cursor = 0,
               .len    = 0,
-              .buffer = (s8) {.data = new (&temp_arena, u8, FULL_MEM / 10), .len = 1024},
+              .buffer = (s8) {.data = new (&temp_arena, u8, FULL_MEM / 10), .len = 2048},
     };
     connections->client_contexts[id] = (ClientContext) {
         .conn_fd                 = newfd,
@@ -153,7 +180,7 @@ void print_config(Config *config) {
 }
 
 typedef struct {
-    s8 val;
+    s8  val;
     int not_found;
 } ConfigVal;
 
@@ -161,14 +188,11 @@ ConfigVal getConfig(Config *config, s8 name) {
     ConfigVal res = {.not_found = 0};
     if (s8equals(name, S("dir"))) {
         res.val = config->dir;
-    }
-    else if (s8equals(name, S("dbfilename"))) {
+    } else if (s8equals(name, S("dbfilename"))) {
         res.val = config->dbfilename;
-    }
-    else if (s8equals(name, S("appendonly"))) {
+    } else if (s8equals(name, S("appendonly"))) {
         res.val = S("no"); // Explicitly disable AOF persistence
-    }
-    else if (s8equals(name, S("save"))) {
+    } else if (s8equals(name, S("save"))) {
         res.val = S(""); // Empty string means RDB persistence is disabled
     } else {
         res.not_found = 1;
@@ -469,10 +493,9 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
             write_response(c_context, &null_resp);
             return;
         }
-        char **key_chars = new (scratch, char*, keys->total);
+        char **key_chars = new (scratch, char *, keys->total);
         for (int i = 0; i < keys->total; i++) {
-            s8 *key = (s8 *) keys->items[i];
-            s8print(*key);
+            s8 *key      = (s8 *) keys->items[i];
             key_chars[i] = s8_to_cstr(scratch, *key);
         }
         printf("keys %d", keys->total);
@@ -500,7 +523,7 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         ConfigVal val = getConfig(sv_context->config, arg->str);
         if (val.not_found == 1) {
             fprintf(stderr, "Unknown Config %s\n", s8_to_cstr(scratch, arg->str));
-            s8    response = serde_array(scratch, NULL, 0);
+            s8 response = serde_array(scratch, NULL, 0);
             write_response(c_context, &response);
             return;
         }
@@ -677,7 +700,7 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         assert(resp_array->count == 2);
         Element *command_val = resp_array->elts[1];
         assert(command_val->type == BULK_STRING);
-        BulkString *key = (BulkString *) command_val->val;
+        BulkString *key  = (BulkString *) command_val->val;
         HashMapNode node = hashmap_get(*ctx->hashmap, key->str);
         if (node.key.len != 0) {
             write_response(ctx, &string_resp);
@@ -691,21 +714,21 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         write_response(ctx, &none_resp);
         return;
     } else if (s8equals_nocase(command->str, S("xadd")) == true) {
-        s8 stream_key = ((BulkString*) resp_array->elts[1]->val)->str;
-        s8print(stream_key);
-        s8 id_raw = ((BulkString*) resp_array->elts[2]->val)->str;
+        s8 stream_key = ((BulkString *) resp_array->elts[1]->val)->str;
+        s8 id_raw     = ((BulkString *) resp_array->elts[2]->val)->str;
 
         char *ms_s, *seqn_s, *tptr;
-        i64 ms, seqn;
+        i64   ms, seqn;
 
-        if(s8equals(id_raw, S("*"))) {
-            ms = get_current_time();
+        if (s8equals(id_raw, S("*"))) {
+            ms   = get_current_time();
             seqn = 0;
         } else {
-            ms_s = strtok_r(s8_to_cstr(&ctx->temp, id_raw), "-" , &tptr);
-            seqn_s = strtok_r(NULL, "-" , &tptr);
+            ms_s   = strtok_r(s8_to_cstr(&ctx->temp, id_raw), "-", &tptr);
+            seqn_s = strtok_r(NULL, "-", &tptr);
 
-            ms = atoi(ms_s);
+            char *endptr;
+            ms = strtoll(ms_s, &endptr, 10);
             DBG(ms, lld);
 
             if (strcmp(seqn_s, "*") == 0) {
@@ -726,37 +749,38 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
                 write_response(ctx, &xadd_id_err_resp_0);
                 return;
             }
-            if (ms < sv_context->last_id_ms || (ms == sv_context->last_id_ms && seqn <= sv_context->last_id_seqn)) {
+            if (ms < sv_context->last_id_ms ||
+                (ms == sv_context->last_id_ms && seqn <= sv_context->last_id_seqn)) {
                 write_response(ctx, &xadd_id_err_resp);
                 return;
             }
         }
         sv_context->last_id_seqn = seqn;
-        sv_context->last_id_ms = ms;
+        sv_context->last_id_ms   = ms;
 
-        HashMap* entry = new(ctx->perm, HashMap);
-        for (int i=3; i<resp_array->count;i+=2) {
-            s8 key = s8clone(ctx->perm, ((BulkString*) resp_array->elts[i]->val)->str);
-            assert(i+1<resp_array->count);
-            s8 val = ((BulkString*) resp_array->elts[i+1]->val)->str;
+        HashMap *items = 0;
+        for (int i = 3; i < resp_array->count; i += 2) {
+            assert(i + 1 < resp_array->count);
+            s8 key = s8clone(sv_context->perm, ((BulkString *) resp_array->elts[i]->val)->str);
+            s8 val = s8clone(sv_context->perm, ((BulkString *) resp_array->elts[i + 1]->val)->str);
             HashMapNode n = {.key = key, .val = val};
-            hashmap_upsert(&entry, sv_context->perm, &n);
+            hashmap_upsert(&items, sv_context->perm, &n);
         }
 
         i32 id_size = 0;
-        i64 ms_c = ms;
+        i64 ms_c    = ms;
         do {
             id_size++;
-        } while(ms_c /= 10);
+        } while (ms_c /= 10);
         id_size++; // for -
         i64 seqn_c = seqn;
         do {
             id_size++;
-        } while(seqn_c /= 10);
+        } while (seqn_c /= 10);
 
         id_size++; // for null termination added by snprintf
         DBG(id_size, d);
-        s8 id = {.len = id_size, .data= new(scratch, u8, id_size)};
+        s8 id = {.len = id_size, .data = new (sv_context->perm, u8, id_size)};
         snprintf(id.data, id_size, "%lld-%lld", ms, seqn);
         DBG(id.data, s);
         id.len--;
@@ -765,7 +789,69 @@ void handle_request(ServerContext *sv_context, ClientContext *c_context, Request
         s8print(sv_context->stream_key);
         s8 resp = serde_bulk_str(scratch, id);
         write_response(ctx, &resp);
-        return;
+
+        StreamEntry *stream_entry = new (sv_context->perm, StreamEntry);
+        stream_entry->id_ms       = ms;
+        stream_entry->id_seq      = seqn;
+        stream_entry->items       = items;
+        stream_entry->id          = id;
+        push_vec(sv_context->stream_entries, stream_entry);
+    } else if (s8equals_nocase(command->str, S("xrange")) == true) {
+        s8 stream_key = ((BulkString *) resp_array->elts[1]->val)->str;
+        assert(s8equals(stream_key, sv_context->stream_key)); // TODO: temp
+        s8      id_begin      = ((BulkString *) resp_array->elts[2]->val)->str;
+        s8      id_end        = ((BulkString *) resp_array->elts[3]->val)->str;
+        vector *entries       = sv_context->stream_entries;
+        int     total_entries = 1;
+
+        Element   *resp_array_elm = new (scratch, Element);
+        RespArray *response       = new (scratch, RespArray);
+        resp_array_elm->val       = response;
+        resp_array_elm->type      = ARRAY;
+        response->count           = total_entries;
+        response->elts            = new (scratch, Element *, total_entries);
+
+        for (int i = 0; i < total_entries; i++) {
+            StreamEntry *entry          = (StreamEntry *) entries->items[i];
+            vector      *entry_contents = initialize_vec();
+            hashmap_items(entry->items, scratch, entry_contents);
+
+            RespArray *entry_items_arr = new (scratch, RespArray);
+            entry_items_arr->elts      = new (scratch, Element *, entry_contents->total);
+            entry_items_arr->count     = entry_contents->total;
+            for (int i = 0; i < entry_contents->total; i++) {
+                s8print(*(s8 *) entry_contents->items[i]);
+                Element *element                      = new (scratch, Element);
+                element->val                          = new (scratch, BulkString);
+                ((BulkString *) element->val)->str    = *((s8 *) entry_contents->items[i]);
+                ((BulkString *) element->val)->is_rdb = 0;
+                element->type                         = BULK_STRING;
+                entry_items_arr->elts[i]              = element;
+            }
+            Element *entry_items = new (scratch, Element);
+            entry_items->val     = entry_items_arr;
+            entry_items->type    = ARRAY;
+
+            Element    *item_id     = new (scratch, Element);
+            BulkString *item_id_str = new (scratch, BulkString);
+            item_id->type           = BULK_STRING;
+            item_id->val            = item_id_str;
+            item_id_str->str        = entry->id;
+
+            RespArray *item_resp_arr = new (scratch, RespArray);
+            item_resp_arr->count     = 2;
+            item_resp_arr->elts      = new (scratch, Element *, 2);
+            item_resp_arr->elts[0]   = item_id;
+            item_resp_arr->elts[1]   = entry_items;
+            Element *item_resp       = new (scratch, Element);
+            item_resp->type          = ARRAY;
+            item_resp->val           = item_resp_arr;
+
+            response->elts[i] = item_resp;
+        }
+
+        s8 items_resp = serde(scratch, *resp_array_elm);
+        write_response(ctx, &items_resp);
     } else {
         printf("Unknown request type\n");
     }
@@ -836,7 +922,7 @@ int main(int argc, char *argv[]) {
 
     print_config(config);
 
-    HashMap* hashmap = new(&arena, HashMap);
+    HashMap *hashmap = new (&arena, HashMap);
 
     if (config->dir.len && config->dbfilename.len) {
         usize path_size = config->dir.len + config->dbfilename.len + 1;
@@ -850,7 +936,7 @@ int main(int argc, char *argv[]) {
         RdbContent *rdb = parse_rdb(&arena, &scratch, full_path);
         if (rdb != NULL) {
             RdbDatabase *db = (RdbDatabase *) rdb->database;
-            *hashmap         = *db->data;
+            *hashmap        = *db->data;
         }
         if (print_rdb_and_exit) {
             print_rdb(rdb);
@@ -903,13 +989,12 @@ int main(int argc, char *argv[]) {
            .count           = 0,
            .size            = MAX_CLIENTS,
     };
-    ServerContext sv_context = {
-        .hashmap     = &hashmap,
-        .config      = config,
-        .perm        = &arena,
-        .replicas    = replicas,
-        .connections = &conns,
-    };
+    ServerContext sv_context = {.hashmap        = &hashmap,
+                                .config         = config,
+                                .perm           = &arena,
+                                .replicas       = replicas,
+                                .connections    = &conns,
+                                .stream_entries = initialize_vec()};
     add_client(&arena, &sv_context, &conns, server_fd);
 
     if (config->master_info != NULL) {

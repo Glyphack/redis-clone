@@ -86,8 +86,12 @@ void hashmap_print(HashMap *h) {
     if (h == NULL) {
         return;
     }
-    printf("key: %.*s, val: %.*s exp: %lld\n", (int) h->node.key.len, h->node.key.data, (int) h->node.val.len, h->node.val.data, h->node.ttl);
+    hashmapnode_print(&h->node);
     for (int i = 0; i < 4; i++) {
         hashmap_print((HashMap *) h->children[i]);
     }
+}
+
+void hashmapnode_print(HashMapNode *node) {
+        printf("key: %.*s, val: %.*s exp: %lld\n", (int) node->key.len, node->key.data, (int) node->val.len, node->val.data, node->ttl);
 }

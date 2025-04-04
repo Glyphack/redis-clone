@@ -27,6 +27,7 @@ HashMapNode hashmap_get(HashMap *, s8);
 void hashmap_keys(HashMap*, Arena*, vector*);
 
 void hashmap_print(HashMap*);
+void hashmapnode_print(HashMapNode *node);
 
 uint64_t hash(s8);
 

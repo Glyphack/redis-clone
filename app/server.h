@@ -93,11 +93,19 @@ typedef struct {
     // If a wait is running;
     WaitState wait_state;
 
-    // streams
+    // streams currently only one stream
     s8 stream_key;
     i64 last_id_ms;
     i64 last_id_seqn;
+    vector* stream_entries;
 } ServerContext;
+
+typedef struct {
+    HashMap* items;
+    i64 id_ms;
+    i64 id_seq;
+    s8 id;
+} StreamEntry;
 
 void* connection_handler(void* arg);
 void *master_connection_handler(void *arg);
