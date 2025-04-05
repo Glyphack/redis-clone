@@ -1,14 +1,23 @@
 #include "resp.h"
 #include "common.h"
-#include "server.h"
 #include "str.h"
 #include <assert.h>
 #include <errno.h>
 #include <setjmp.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+i64 num_len(i64 num) {
+    i64 len  = 0;
+    i64 copy = num;
+    do {
+        len++;
+    } while (copy /= 10);
+    return len;
+}
 
 // Error string lookup function
 const char *resp_error_string(RespError err) {
@@ -263,15 +272,12 @@ Element parse_element(Arena *arena, BufferReader *buffer) {
     return element;
 }
 
-int insert_number(Arena *arena, char *dest, int len, int start_pos) {
-    int num_len  = 1;
-    int len_copy = len;
-    while (len_copy /= 10)
-        num_len++;
-    int   pos      = start_pos;
-    char *len_str  = new (&(*arena), char, num_len);
-    int   len_pos  = 0;
-    int   temp_len = len;
+int insert_number(Arena *arena, char *dest, i64 len, int start_pos) {
+    i64   num_len_str = num_len(len);
+    int   pos         = start_pos;
+    char *len_str     = new (&(*arena), char, num_len_str);
+    int   len_pos     = 0;
+    i64   temp_len    = len;
     do {
         len_str[len_pos++] = '0' + (temp_len % 10);
         temp_len /= 10;
@@ -320,8 +326,9 @@ s8 serde_int(Arena *arena, int val) {
     return str;
 }
 
+// Don't use
 s8 serde_array(Arena *arena, char **items, int item_len) {
-    size resp_len        = RESPONSE_ITEM_MAX_SIZE * item_len + item_len % 10 + 5;
+    size resp_len        = 1024 * item_len + item_len % 10 + 5;
     s8   response        = (s8) {.len = resp_len, .data = new (arena, u8, resp_len)};
     int  pos             = 0;
     response.data[pos++] = '*';
@@ -341,31 +348,32 @@ s8 serde_array(Arena *arena, char **items, int item_len) {
 
 s8 serde(Arena *arena, Element element) {
     switch (element.type) {
-        case ARRAY:
-                ;
-                RespArray *array = (RespArray*) element.val;
-                DBG(array->count, d);
-                size resp_len        = RESPONSE_ITEM_MAX_SIZE * array->count + array->count % 10 + 5;
-                s8   response        = (s8) {.len = resp_len, .data = new (arena, u8, resp_len)};
-                int  pos             = 0;
-                response.data[pos++] = '*';
-                pos                  = insert_number(arena, (char *) response.data, array->count, pos);
-                response.data[pos++] = '\r';
-                response.data[pos++] = '\n';
-                for (int i=0;i<array->count;i++) {
-                    Element *elm = array->elts[i];
-                    s8 elm_serde = serde(arena, *elm);
-                    memcpy(response.data + pos, elm_serde.data, elm_serde.len);
-                    pos += elm_serde.len;
-                }
-                return response;
-            break;
-        case BULK_STRING:
-                ;
-                BulkString *str = (BulkString*) element.val;
-                s8 res = serde_bulk_str(arena, str->str);
-                return res;
-        default:
-            UNREACHABLE();
+    case ARRAY:;
+        RespArray *array    = (RespArray *) element.val;
+        size       resp_len = 3 + num_len(array->count);
+        for (int i = 0; i < array->count; i++) {
+            s8 elm_serde = serde(arena, *array->elts[i]);
+            resp_len += elm_serde.len;
+        }
+        s8  response         = (s8) {.len = resp_len, .data = new (arena, u8, resp_len)};
+        int pos              = 0;
+        response.data[pos++] = '*';
+        pos                  = insert_number(arena, (char *) response.data, array->count, pos);
+        response.data[pos++] = '\r';
+        response.data[pos++] = '\n';
+        for (int i = 0; i < array->count; i++) {
+            Element *elm       = array->elts[i];
+            s8       elm_serde = serde(arena, *elm);
+            memcpy(response.data + pos, elm_serde.data, elm_serde.len);
+            pos += elm_serde.len;
+        }
+        return response;
+        break;
+    case BULK_STRING:;
+        BulkString *str = (BulkString *) element.val;
+        s8          res = serde_bulk_str(arena, str->str);
+        return res;
+    default:
+        UNREACHABLE();
     }
 }

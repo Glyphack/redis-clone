@@ -5,6 +5,7 @@
 #include "arena.h"
 
 #define S(s) (s8){.data=(u8 *)s, .len=lengthof(s)}
+typedef uint8_t   u8;
 typedef struct {
     u8  *data;
     size len;
@@ -43,4 +44,5 @@ s8   s8clone(Arena *, s8);
 s8 s8concat(Arena *arena, s8 a, s8 b);
 void s8print(s8);
 i64 s8to_i64(s8 str);
+s8 substr(s8 a);
 #endif

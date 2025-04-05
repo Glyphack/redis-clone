@@ -8,7 +8,6 @@
 #include "vec.h"
 #include <netinet/in.h>
 
-#define RESPONSE_ITEM_MAX_SIZE 1024
 #define MAX_CLIENTS 100
 
 
@@ -60,7 +59,10 @@ typedef struct {
 typedef struct {
     int conn_fd;
     int conn_id;
+    // Freed after client disconnects
+    // TODO: Create one per client.
     Arena* perm;
+    // Freed after req/res cycle
     Arena temp;
     HashMap** hashmap;
     int want_read;
@@ -83,6 +85,48 @@ typedef struct {
 } Connections;
 
 typedef struct {
+    vector* keyvals;
+    i64 id_ms;
+    i64 id_seq;
+    s8 id;
+} StreamEntry;
+
+typedef struct {
+    i64 id_ms;
+    i64 id_seq;
+} EntryId;
+//
+// typedef union {
+//     s8 val;
+//     EntryId id;
+// } StreamEntryFlatItem;
+
+typedef struct {
+    // ["key", "val", "1-0", "key", "val2", "0-1", ...]
+    // key values cannot have -
+    vector* contents;
+    // {"100-0": "0", "101-0": "1", "200-0": "2"}
+    HashMap* IDIndex;
+} StreamEntries;
+
+typedef struct {
+    s8 stream_key;
+    i64 last_id_ms;
+    i64 last_id_seqn;
+    StreamEntries stream_entries;
+} Stream;
+
+typedef struct {
+    //  TODO: map of stream key to Stream
+    vector* streams; // vector of streams
+} Streams;
+
+void streams_new(Arena *arena, Streams *streams, Stream stream);
+Stream* streams_get(Streams*, s8);
+void stream_new_entry(Arena*, Stream*, StreamEntry*);
+void stream_get_range(Arena *arena, Stream *stream, vector *result, s8 id_begin, s8 id_end);
+
+typedef struct {
     Connections *connections;
     HashMap** hashmap;
     Config* config;
@@ -92,21 +136,8 @@ typedef struct {
     ReplicationContext *replication_context;
     // If a wait is running;
     WaitState wait_state;
-
-    // streams currently only one stream
-    s8 stream_key;
-    i64 last_id_ms;
-    i64 last_id_seqn;
-    vector* stream_entries;
+    // Collection of streams in this server
+    Streams streams;
 } ServerContext;
 
-typedef struct {
-    HashMap* items;
-    i64 id_ms;
-    i64 id_seq;
-    s8 id;
-} StreamEntry;
-
-void* connection_handler(void* arg);
-void *master_connection_handler(void *arg);
 #endif

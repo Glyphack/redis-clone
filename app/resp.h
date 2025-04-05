@@ -4,9 +4,6 @@
 #include <setjmp.h>
 
 
-// Response size constant
-#define RESPONSE_ITEM_MAX_SIZE 1024
-
 static s8 null_resp = S("$-1\r\n");
 static s8 ok_resp = S("+OK\r\n");
 static s8 pong_resp = S("+PONG\r\n");
@@ -105,5 +102,6 @@ s8 serde_array(Arena *arena, char **items, int item_len);
 s8 serde_int(Arena *arena, int val);
 
 void append_read_buf(BufferReader *);
-int insert_number(Arena *arena, char *dest, int len, int start_pos);
+int insert_number(Arena *, char *, i64 , int );
+i64 num_len(i64 );
 #endif

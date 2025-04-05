@@ -18,7 +18,7 @@ s8 s8_from_cstr(Arena *arena, const char *cstr) {
     s8   str;
     str.data = new (arena, u8, len);
     memcpy(str.data, cstr, len);
-    str.len       = len;
+    str.len = len;
     return str;
 }
 
@@ -35,6 +35,11 @@ s8 s8span(u8 *start, u8 *end) {
     str.data = start;
     str.len  = end - start;
     return str;
+}
+
+s8 substr(s8 a) {
+    s8 substr = {.data = a.data + 1, .len = a.len - 1};
+    return substr;
 }
 
 // Checks if two strings are equal

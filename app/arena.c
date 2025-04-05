@@ -1,11 +1,11 @@
 #include "arena.h"
+#include "common.h"
 #include "stdlib.h"
 #include "types.h"
 
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-
 
 #if __APPLE__
 #define MAX_FRAMES 100
@@ -26,7 +26,8 @@ void print_stacktrace() {
     free(strings);
 }
 #else
-void print_stacktrace() {}
+void print_stacktrace() {
+}
 #endif
 
 Arena newarena(size cap) {
@@ -40,6 +41,7 @@ Arena newarena(size cap) {
 __attribute((malloc, alloc_align(3))) void *alloc(Arena *a, size sz, size align, size count) {
     size padding   = -(uintptr_t) a->offset & (align - 1);
     size available = a->end - a->offset - padding;
+
     if (available < 0 || count > available / sz) {
         printf("Out of memory\n");
         print_stacktrace();
